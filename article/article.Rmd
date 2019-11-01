@@ -191,15 +191,112 @@ The first assessment looks at the capability of ECMWF fire forecast to reproduce
 knitr::include_graphics("../images/synops_col.png")
 ```
 
-```
-\begin{figure*}
-    \centering
-        \includegraphics[width=\textwidth]{station_error.png}
-    \caption{Comparison between modelled FWI and observed FWI value. FWI are calculated from using ECMWF reanalysis (ERA5) and forecasts at different lead times. The box plots are used to describe the distribution of values accross the observation points for the 2017 Mean Bias  (panel a) and the 2017 mean absolute error (panel b)} \label{fig:synop}
-\end{figure*}
+```{r prepFigure3, echo = FALSE, message = FALSE, results = 'hide', cache = TRUE}
+## Get data from previous publication
+# https://github.com/cvitolo/GEFF-ERA5/blob/master/data/df_geff_erai_era5.rds
+# save it in the "../data" folder
+# df <- readRDS(file = "../data/df_geff_erai_era5.rds")
+# stations <- unique(df[, c("id", "lat", "long")])
+# 
+# dates2017 <- seq.Date(from = as.Date("2017-01-01"),
+#                       to = as.Date("2017-12-31"),
+#                       by = "day")
+
+# Get forecasts for day 2-6-10
+# This code chunk uses forecast data, which is not open.
+# The code is commented out and the result is provided in the form of a table
+# and stored in the ../data folder.
+
+# day2FWI <- raster::stack()
+# day6FWI <- raster::stack()
+# day10FWI <- raster::stack()
+# for (file in list.files(path = "/hugetmp/FireEventsDatabase/fwi2017/ffwi_rotated",
+#                         pattern = "*hr.nc", full.names = TRUE)){
+#   print(file)
+#   x <- raster::brick(file)
+#   day2FWI <- raster::stack(day2FWI, x[[2]])
+#   day6FWI <- raster::stack(day6FWI, x[[6]])
+#   day10FWI <- raster::stack(day10FWI, x[[10]])
+# }
+
+# df_used <- data.frame(matrix(NA, nrow = 0, ncol = 18))
+# names(df_used) <- c("id", "lat", "long", "tzid", "season", "yr", "mon", "day",
+#                     "temp", "prec", "rh", "ws", "OBS", "ERAI", "ERA5",
+#                     "HRES_d2", "HRES_d6", "HRES_d10")
+# for (i in seq_along(stations$id)){
+# 
+#   # We filter over the station
+#   dfx <- df %>% filter(id == stations$id[i],
+#                        lat == stations$lat[i],
+#                        long == stations$long[i])
+#   print(paste(i, dim(dfx)[1]))
+# 
+#   if (dim(dfx)[1] >= 30){
+#     # Calculate the observed FWI
+#     initial_condition <- data.frame(ffmc = 85, dmc = 6, dc = 15,
+#                                     lat = dfx$lat[1])
+#     dfx$fwiobs <- cffdrs::fwi(input = dfx,
+#                               init = initial_condition,
+#                               out = "fwi")$FWI
+# 
+#     # Define spatial point
+#     spdf <- dfx[1, ]
+#     # Promote data.frame to spatial
+#     coordinates(spdf) = ~long + lat
+# 
+#     # Select timestamp
+#     mytimestamps <- which(dates2017 %in%
+#                             as.Date(paste0(dfx$yr, "-",
+#                                            sprintf("%02d", dfx$mon), "-",
+#                                            sprintf("%02d", dfx$day))))
+# 
+#     # Extract the modelled FWI from HRES day 2
+#     temp_d2 <- t(raster::extract(x = day2FWI, y = spdf))
+#     dfx$HRES_d2 <- temp_d2[mytimestamps]
+# 
+#     # Extract the modelled FWI from HRES day 6
+#     temp_d6 <- t(raster::extract(x = day6FWI, y = spdf))
+#     dfx$HRES_d6 <- temp_d6[mytimestamps]
+# 
+#     # Extract the modelled FWI from HRES day 10
+#     temp_d10 <- t(raster::extract(x = day10FWI, y = spdf))
+#     dfx$HRES_d10 <- temp_d10[mytimestamps]
+# 
+#     df_used <- dplyr::bind_rows(df_used, dfx)
+#   }
+# 
+# }
+# 
+# # Remove NAs
+# df_used <- df_used[complete.cases(df_used),]
+# saveRDS(df_used, "data/SYNOPtable.rds")
+
+df_used <- readRDS("../data/SYNOPtable.rds")
+
+d <- df_used %>%
+  select(fwiobs, ERA5, HRES_d2, HRES_d6, HRES_d10) %>%
+  reshape2::melt(id.vars = "fwiobs") %>%
+  filter(fwiobs < 250) %>%
+  filter(value < 250) %>%
+  filter(complete.cases(.)) %>%
+  mutate(BIAS = fwiobs - value,
+         MAE = abs(fwiobs - value)) %>%
+  rename(modelled_type = variable, modelled_value = value) %>%
+  reshape2::melt(id.vars = c("fwiobs", "modelled_type", "modelled_value"))
 ```
 
-Despite its importance  the analysis performed using the synop network it is still pointwise and does not cover all the regions where fires are relevant. Moreover mean biases and MAE are based on the high resolution forecast. These skill metrics do not provide information about the performance of the ensemble forecasting as a whole. 
+```{r Figure3, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure3}Comparison between modelled FWI and observed FWI value. FWI are calculated from using ECMWF reanalysis (ERA5) and forecasts at different lead times. The box plots are used to describe the distribution of values accross the observation points for the 2017 Mean Bias (left panel) and the 2017 mean absolute error (right panel)."}
+ggplot(d, aes(x = modelled_type, y = value, fill = modelled_type)) +
+  facet_wrap( ~ variable, ncol = 2) +
+  geom_boxplot(color="black", size=0.2,  outlier.shape = NA) +
+  theme_bw() + ylim(-2, 12) +
+  xlab("") + ylab("") +
+  scale_fill_discrete_qualitative() +
+  theme(legend.position = "none") +
+  scale_x_discrete(labels = c("ERA5", "HRES_D2", "HRES_D6", "HRES_D10"))
+```
+
+Despite its importance  the analysis performed using the synop network is still pointwise and does not cover all the regions where fires are relevant. Moreover mean biases and MAE are based on the high resolution forecast. These skill metrics do not provide information about the performance of the ensemble forecasting as a whole. 
 
 Figure \ref{fig:crp} 
 
