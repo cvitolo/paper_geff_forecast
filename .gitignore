@@ -3,8 +3,5 @@
 .RData
 .Ruserdata
 *Rproj
-article/article.log
-article/article.tex
-article/gadm*.rds
 data/extra/*
 scripts/*

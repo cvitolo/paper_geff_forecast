@@ -298,15 +298,11 @@ ggplot(d, aes(x = modelled_type, y = value, fill = modelled_type)) +
 
 Despite its importance  the analysis performed using the synop network is still pointwise and does not cover all the regions where fires are relevant. Moreover mean biases and MAE are based on the high resolution forecast. These skill metrics do not provide information about the performance of the ensemble forecasting as a whole. 
 
-Figure \ref{fig:crp} 
+```{r Figure4, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure4}PUT here crps skills scores."}
 
+```
 
-\textbf{ PUT here crps skills scores}
-
-
-
-
-\subsection{ Skill in detecting fire events}
+\subsection{Skill in detecting fire events}
 
 Conventionally, we assume that an active fire is correctly predicted if the FWI is greater than the 95$^{th}$ percentile of its distribution of values here defined using the ERA5 database. Figure~\ref{fig:pod} shows the mean POD for all events in 2017 at forecast day 2, 6 and day 10. Figure~\ref{fig:pod} also shows the POD that could be achieved in the absence of a forecasting system when just using a mean climatological FWI estimation. Given the intrinsic limitations of the POD as skill metric, CLIM provides an useful benchmark to understand the incremental skill provided by the forecast. 
 
