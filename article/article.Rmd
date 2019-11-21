@@ -192,100 +192,145 @@ knitr::include_graphics("../images/synops_col.png")
 ```
 
 ```{r prepFigure3, echo = FALSE, message = FALSE, results = 'hide', cache = TRUE}
-## Get data from previous publication
+library("easyVerification")
+# The following code uses forecast data which is restricted.
+# A summary table is computed and saved for users at the end of this code chunk.
+# Get data from previous publication
 # https://github.com/cvitolo/GEFF-ERA5/blob/master/data/df_geff_erai_era5.rds
 # save it in the "../data" folder
-# df <- readRDS(file = "../data/df_geff_erai_era5.rds")
-# stations <- unique(df[, c("id", "lat", "long")])
-# 
-# dates2017 <- seq.Date(from = as.Date("2017-01-01"),
-#                       to = as.Date("2017-12-31"),
-#                       by = "day")
+df <- readRDS(file = "../data/df_geff_erai_era5.rds")
+# insert 1-year fire season for tropics (lat = [-30, +30])
+df$season[df$lat < 30 & df$lat > -30] <- "Dry"
+# Remove wet season (we are only interested in the dry season)
+df <- df[df$season == "Dry", ]
+# How many stations remain?
+stations <- unique(df[, c("id", "lat", "long")])
 
-# Get forecasts for day 2-6-10
-# This code chunk uses forecast data, which is not open.
-# The code is commented out and the result is provided in the form of a table
-# and stored in the ../data folder.
+df$region <- sapply(strsplit(df$tzid, "/"), `[`, 1)
+df$date <- as.Date(paste0(df$yr, "-", df$mon, "-", df$day))
+df <- df[, c("id", "lat", "long", "region", "date", "OBS", "ERA5")]
 
-# day2FWI <- raster::stack()
-# day6FWI <- raster::stack()
-# day10FWI <- raster::stack()
-# for (file in list.files(path = "/hugetmp/FireEventsDatabase/fwi2017/ffwi_rotated",
-#                         pattern = "*hr.nc", full.names = TRUE)){
-#   print(file)
-#   x <- raster::brick(file)
-#   day2FWI <- raster::stack(day2FWI, x[[2]])
-#   day6FWI <- raster::stack(day6FWI, x[[6]])
-#   day10FWI <- raster::stack(day10FWI, x[[10]])
-# }
+dates2017 <- seq.Date(from = as.Date("2017-01-01"),
+                      to = as.Date("2017-12-31"),
+                      by = "day")
 
-# df_used <- data.frame(matrix(NA, nrow = 0, ncol = 18))
-# names(df_used) <- c("id", "lat", "long", "tzid", "season", "yr", "mon", "day",
-#                     "temp", "prec", "rh", "ws", "OBS", "ERAI", "ERA5",
-#                     "HRES_d2", "HRES_d6", "HRES_d10")
-# for (i in seq_along(stations$id)){
-# 
-#   # We filter over the station
-#   dfx <- df %>% filter(id == stations$id[i],
-#                        lat == stations$lat[i],
-#                        long == stations$long[i])
-#   print(paste(i, dim(dfx)[1]))
-# 
-#   if (dim(dfx)[1] >= 30){
-#     # Calculate the observed FWI
-#     initial_condition <- data.frame(ffmc = 85, dmc = 6, dc = 15,
-#                                     lat = dfx$lat[1])
-#     dfx$fwiobs <- cffdrs::fwi(input = dfx,
-#                               init = initial_condition,
-#                               out = "fwi")$FWI
-# 
-#     # Define spatial point
-#     spdf <- dfx[1, ]
-#     # Promote data.frame to spatial
-#     coordinates(spdf) = ~long + lat
-# 
-#     # Select timestamp
-#     mytimestamps <- which(dates2017 %in%
-#                             as.Date(paste0(dfx$yr, "-",
-#                                            sprintf("%02d", dfx$mon), "-",
-#                                            sprintf("%02d", dfx$day))))
-# 
-#     # Extract the modelled FWI from HRES day 2
-#     temp_d2 <- t(raster::extract(x = day2FWI, y = spdf))
-#     dfx$HRES_d2 <- temp_d2[mytimestamps]
-# 
-#     # Extract the modelled FWI from HRES day 6
-#     temp_d6 <- t(raster::extract(x = day6FWI, y = spdf))
-#     dfx$HRES_d6 <- temp_d6[mytimestamps]
-# 
-#     # Extract the modelled FWI from HRES day 10
-#     temp_d10 <- t(raster::extract(x = day10FWI, y = spdf))
-#     dfx$HRES_d10 <- temp_d10[mytimestamps]
-# 
-#     df_used <- dplyr::bind_rows(df_used, dfx)
-#   }
-# 
-# }
-# 
-# # Remove NAs
-# df_used <- df_used[complete.cases(df_used),]
-# saveRDS(df_used, "data/SYNOPtable.rds")
+forecasts_folder <- "/hugetmp/FireEventsDatabase/forecasts/fwi/"
 
-df_used <- readRDS("../data/SYNOPtable.rds")
+df_used <- data.frame(matrix(NA, nrow = 0, ncol = 13))
+names(df_used) <- c("id", "lat", "long", "region", "date", "OBS", "ERA5",
+                    "HRES_d2", "HRES_d6", "HRES_d10", "CRPS_d2", "CRPS_d6", "CRPS_d10")
 
-d <- df_used %>%
-  select(fwiobs, ERA5, HRES_d2, HRES_d6, HRES_d10) %>%
-  reshape2::melt(id.vars = "fwiobs") %>%
-  filter(fwiobs < 250) %>%
-  filter(value < 250) %>%
-  filter(complete.cases(.)) %>%
-  mutate(BIAS = fwiobs - value,
-         MAE = abs(fwiobs - value)) %>%
-  rename(modelled_type = variable, modelled_value = value) %>%
-  reshape2::melt(id.vars = c("fwiobs", "modelled_type", "modelled_value"))
+for (i in seq_along(dates2017)[216:365]){
+
+  print(dates2017[i])
+  
+  # What stations have data on this date?
+  dfx <- df %>% filter(date == dates2017[i]) %>% filter(complete.cases(.))
+  # Define spatial point
+  spdf <- dfx[, c("id", "lat", "long")]
+  # Promote data.frame to spatial
+  coordinates(spdf) = ~long + lat
+  
+  # Calculate lead days
+  day2 <- dates2017[i] - 1
+  day6 <- dates2017[i] - 5
+  day10 <- dates2017[i] - 9
+
+  # Get data from HRES forecasts, e.g. ECMWF_FWI_20170101_1200_hr_fwi.nc
+  if (day10 %in% dates2017){
+    
+    # Day2
+    HRES2 <- raster::brick(file.path(forecasts_folder,
+                                     paste0("ECMWF_FWI_",
+                                            gsub("-", "",
+                                                 as.character(day2)),
+                                            "_1200_hr_fwi.nc")))[[2]]
+    dfx$HRES_d2 <- raster::extract(x = HRES2, y = spdf)
+    # Day6
+    HRES6 <- raster::brick(file.path(forecasts_folder,
+                                     paste0("ECMWF_FWI_",
+                                            gsub("-", "",
+                                                 as.character(day6)),
+                                            "_1200_hr_fwi.nc")))[[6]]
+    dfx$HRES_d6 <- raster::extract(x = HRES6, y = spdf)
+    # Day10
+    HRES10 <- raster::brick(file.path(forecasts_folder,
+                                      paste0("ECMWF_FWI_",
+                                             gsub("-", "",
+                                                  as.character(day10)),
+                                             "_1200_hr_fwi.nc")))[[10]]
+    dfx$HRES_d10 <- raster::extract(x = HRES10, y = spdf)
+    rm(HRES2, HRES6, HRES10)
+    
+    # Remove NAs
+    dfx <- dfx %>% filter(complete.cases(.))
+    # Re-define spatial point
+    spdf <- dfx[, c("id", "lat", "long")]
+    # Promote data.frame to spatial
+    coordinates(spdf) = ~long + lat
+
+    # Get data from ENS forecasts
+    nstations <- dim(spdf@data)[1]
+    mat2 <- matrix(NA, nrow = nstations, ncol = 51)
+    mat6 <- matrix(NA, nrow = nstations, ncol = 51)
+    mat10 <- matrix(NA, nrow = nstations, ncol = 51)
+    for (j in 1:51){
+    
+      # Extract the modelled FWI from ENS
+      ens_member <- sprintf("%02d", j - 1)
+      # Day2
+      ENS2 <- raster::brick(file.path(forecasts_folder,
+                                       paste0("ECMWF_FWI_",
+                                              gsub("-", "",
+                                                   as.character(day2)),
+                                              "_1200_", ens_member,
+                                              "_fwi.nc")))[[2]]
+      mat2[, j] <- raster::extract(x = ENS2, y = spdf)
+      # Day6
+      ENS6 <- raster::brick(file.path(forecasts_folder,
+                                       paste0("ECMWF_FWI_",
+                                              gsub("-", "",
+                                                   as.character(day6)),
+                                              "_1200_", ens_member,
+                                              "_fwi.nc")))[[6]]
+      mat6[, j] <- raster::extract(x = ENS6, y = spdf)
+      # Day10
+      ENS10 <- raster::brick(file.path(forecasts_folder,
+                                       paste0("ECMWF_FWI_",
+                                              gsub("-", "",
+                                                   as.character(day10)),
+                                              "_1200_", ens_member,
+                                              "_fwi.nc")))[[10]]
+      mat10[, j] <- raster::extract(x = ENS10, y = spdf)
+    }
+    # Populate CRPS for Day 2
+    dfx$CRPS_d2 <- veriApply(verifun = "EnsCrps", fcst = mat2, obs = dfx$OBS)
+    # Populate CRPS for Day 6
+    dfx$CRPS_d6 <- veriApply(verifun = "EnsCrps", fcst = mat6, obs = dfx$OBS)
+    # Populate CRPS for Day 10
+    dfx$CRPS_d10 <- veriApply(verifun = "EnsCrps", fcst = mat10, obs = dfx$OBS)
+
+    # Append to table
+    df_used <- dplyr::bind_rows(df_used, dfx)
+
+    saveRDS(df_used, "../data/df_geff_era5_hres_crps.rds")
+  }
+}
+
+df_used <- readRDS("../data/df_geff_era5_hres_crps.rds")
 ```
 
 ```{r Figure3, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure3}Comparison between modelled FWI and observed FWI value. FWI are calculated from using ECMWF reanalysis (ERA5) and forecasts at different lead times. The box plots are used to describe the distribution of values accross the observation points for the 2017 Mean Bias (left panel) and the 2017 mean absolute error (right panel)."}
+d <- df_used %>%
+  select(OBS, ERA5, HRES_d2, HRES_d6, HRES_d10) %>%
+  filter(complete.cases(.)) %>% # Remove NAs
+  reshape2::melt(id.vars = "OBS") %>%
+  filter(OBS < 250, value < 250) %>%
+  mutate(BIAS = OBS - value,
+         MAE = abs(OBS - value)) %>%
+  rename(modelled_type = variable, modelled_value = value) %>%
+  reshape2::melt(id.vars = c("fwiobs", "modelled_type", "modelled_value"))
+
 ggplot(d, aes(x = modelled_type, y = value, fill = modelled_type)) +
   facet_wrap( ~ variable, ncol = 2) +
   geom_boxplot(color="black", size=0.2,  outlier.shape = NA) +
@@ -299,7 +344,19 @@ ggplot(d, aes(x = modelled_type, y = value, fill = modelled_type)) +
 Despite its importance  the analysis performed using the synop network is still pointwise and does not cover all the regions where fires are relevant. Moreover mean biases and MAE are based on the high resolution forecast. These skill metrics do not provide information about the performance of the ensemble forecasting as a whole. 
 
 ```{r Figure4, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure4}PUT here crps skills scores."}
+d <- df_used %>%
+  select(region, CRPS_d2, CRPS_d6, CRPS_d10) %>%
+  rename(Region = region, Day2 = CRPS_d2, Day6 = CRPS_d6, Day10 = CRPS_d10) %>%
+  reshape2::melt(id.vars = "Region") %>%
+  filter(complete.cases(.)) %>%
+  rename(CRPS = value) %>%
+  group_by(Region, variable) %>%
+  summarise(CRPS = mean(CRPS))
 
+ggplot(d, aes(x = variable, y = CRPS, colour = Region)) +
+  geom_point() +
+  xlab("") +
+  scale_fill_manual(name="Region")
 ```
 
 \subsection{Skill in detecting fire events}
