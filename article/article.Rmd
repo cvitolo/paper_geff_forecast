@@ -115,44 +115,177 @@ library("sp")
 library("RColorBrewer")
 library("stringr")
 library("colorspace")
+library("easyVerification")
+library("spatialEco")
+
+forecasts_folder <- "/hugetmp/forecasts/fwi"
+
+dates2017 <- seq.Date(from = as.Date("2017-01-01"),
+                      to = as.Date("2017-12-31"),
+                      by = "day")
+
+datesERA5 <- seq.Date(from = as.Date("1980-01-01"),
+                      to = as.Date("2019-06-30"),
+                      by = "day")
+
+# Get all GFED4 regions
+BasisRegions <- readRDS("data/BasisRegions_simplified.rds")
 ```
 
-```{r areas, echo = FALSE, message = FALSE, results = 'hide', cache = TRUE}
-## Get GFED4 regions and countries of interest
-dfgfed4 <- data.frame(ID = 1:14,
-                      Region = c("BONA", "TENA", "CEAM", "NHSA", "SHSA", "EURO",
-                                 "MIDE", "NHAF", "SHAF", "BOAS", "CEAS", "SEAS",
-                                 "EQAS", "AUST"),
-                      Zone = c("north", "north", "tropics", "tropics", "south",
-                               "north", "north", "tropics", "south", "north",
-                               "north", "tropics", "tropics", "south"),
-                      stringsAsFactors = FALSE)
+\section{Results}
 
-BasisRegions <- readRDS("../data/BasisRegions_simplified.rds")
+\subsection{Skill in the FWI prediction}
+The first assessment looks at the capability of ECMWF fire forecast to reproduce the same FWI values as would be estimated from the network of local stations but 2, 6 and 10 days ahead. The selected stations (figure \ref{fig:Figure2}) have at least 30 records during 2017 at local noon and are used to perform an analysis of bias and anomaly correlation at different lead times. For comparison also FWI calculation using ERA5 is included. This provide an estimations of the limit of predictability when using forcing from model simulations in place of observed values \citep{digiuseppe:16}. As expected there is a performance degradation going towards longer lead times and mean biases are limited to few units even at day 10. However, depending on the calibration procedure adopted few units could mean a mismatch in danger level classification.  The mean absolute error  (figure \ref{fig:synop}b)  provides  information on the residual amplitudes.  FWI from reanalysis have the largest skills as expected and the mean absolute errors rapidly increases with lead times. However the distribution of MAE values clearly shows that in selected cases predictive skills can be achievable even at day 10.
+
+```{r prep, echo = FALSE, message = FALSE, results = 'hide', cache = TRUE}
+# The following code uses forecast data which is restricted.
+# A summary table is computed and saved for users at the end of this code chunk.
+#
+# Get data from previous publication
+# https://github.com/cvitolo/GEFF-ERA5/blob/master/data/df_geff_erai_era5.rds
+# save it in the "../data" folder
+# df <- readRDS(file = "data/df_geff_erai_era5.rds")
+# # insert 1-year fire season for tropics (lat = [-30, +30])
+# df$season[df$lat < 30 & df$lat > -30] <- "Dry"
+# # Remove wet season (we are only interested in the dry season)
+# df <- df[df$season == "Dry", ]
+# # How many stations remain?
+# stations <- unique(df[, c("id", "lat", "long")])
+# 
+# df$region <- sapply(strsplit(df$tzid, "/"), `[`, 1)
+# df$date <- as.Date(paste0(df$yr, "-", df$mon, "-", df$day))
+# df <- df[, c("id", "lat", "long", "region", "date", "OBS", "ERA5")]
+# 
+# df_used <- data.frame(matrix(NA, nrow = 0, ncol = 37))
+# names(df_used) <- c("id", "lat", "long", "region", "date", "OBS", "ERA5",
+#                     paste0(c("CLIM_d", "HRES_d", "CRPS_d"), rep(1:10, each =3)))
+# 
+# for (i in seq_along(dates2017)){
+# 
+#   print(dates2017[i])
+# 
+#   # What stations have data on this date?
+#   dfx <- df %>% filter(date == dates2017[i]) %>% filter(complete.cases(.))
+#   # Define spatial point
+#   spdf <- dfx[, c("id", "lat", "long")]
+#   # Promote data.frame to spatial
+#   coordinates(spdf) = ~long + lat
+#   crs(spdf) <- new("CRS",
+#                    projargs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+#   # Get data from ENS forecasts
+#   nstations <- dim(spdf@data)[1]
+# 
+#   # Get data from HRES forecasts, e.g. ECMWF_FWI_20170101_1200_hr_fwi.nc
+#   for (leadtime in 1:10){
+# 
+#     lead_day <- dates2017[i] + leadtime - 1
+# 
+#     # Get ERA5 data
+#     message(paste("Handling ERA5 for", lead_day))
+#     dayx <- which(format(datesERA5, "%m-%d") %in% format(lead_day, "%m-%d")
+#                   & lubridate::year(datesERA5) != "2017")
+#     system(paste0("cdo seltimestep,", paste0(dayx, collapse = ","),
+#                   " /scratch/rd/nen/perClaudia/era5/fwi_1980_2019.nc ",
+#                   "/scratch/rd/nen/perClaudia/era5/fwi_1980_2019_dayx.nc"),
+#            ignore.stderr = TRUE)
+#     ERA5 <- brick("/scratch/rd/nen/perClaudia/era5/fwi_1980_2019_dayx.nc")
+#     # ERA5 was stored with longitudes already rotated to [-180, +180],
+#     # HRES and ENS will need to be rotated
+#     df_era5 <- raster::extract(x = ERA5, y = spdf)
+# 
+#     # Get HRES
+#     message(paste("Handling HRES for", dates2017[i], "day", leadtime))
+#     HRES <- raster::brick(file.path(forecasts_folder,
+#                                     paste0("ECMWF_FWI_",
+#                                            gsub("-", "",
+#                                                 as.character(dates2017[i])),
+#                                            "_1200_hr_fwi.nc")))[[leadtime]]
+#     df_hres <- raster::extract(x = rotate(HRES), y = spdf)
+# 
+#     # Get ENS
+#     df_ens <- matrix(NA, nrow = nstations, ncol = 51)
+#     message(paste("Handling ENS for", dates2017[i], "day", leadtime))
+#     for (j in 1:51){
+#       # Extract the modelled FWI from ENS
+#       ens_member <- sprintf("%02d", j - 1)
+#       ENS <- raster::brick(file.path(forecasts_folder,
+#                                      paste0("ECMWF_FWI_",
+#                                             gsub("-", "",
+#                                                  as.character(dates2017[i])),
+#                                             "_1200_", ens_member,
+#                                             "_fwi.nc")))[[leadtime]]
+#       df_ens[, j] <- raster::extract(x = rotate(ENS), y = spdf)
+#     }
+# 
+#     # Remove rows with NAs and update spatial points
+#     if (leadtime == 1){
+#       rows2remove <- which(rowSums(is.na(df_era5)) > 0)
+#       if (length(rows2remove) > 0){
+#         df_ens <- df_ens[-rows2remove, ]
+#         df_hres <- df_hres[-rows2remove]
+#         df_era5 <- df_era5[-rows2remove, ]
+#         # Resample ERA5 to get 39 random ensemble members
+#         df_era5 <- df_era5[, sample(x = 1:dim(df_era5)[2], size = 39,
+#                                     replace = TRUE)]
+# 
+#         dfx <- dfx[-rows2remove, ]
+#         # Re-define spatial point
+#         spdf <- dfx[, c("id", "lat", "long")]
+#         # Promote data.frame to spatial
+#         coordinates(spdf) = ~long + lat
+#         crs(spdf) <- new("CRS",
+#                          projargs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+#         # Get data from ENS forecasts
+#         nstations <- dim(spdf@data)[1]
+#       }
+#     }
+# 
+#     # Populate CRPS
+#     df_crps <- veriApply(verifun = "EnsCrps", fcst = df_ens, obs = df_era5)
+#     df_crpss <- apply(X = df_crps, MARGIN = 1, FUN = mean)
+#     df_era5_mean <- apply(X = df_era5, MARGIN = 1, FUN = mean)
+# 
+#     dfx <- cbind(dfx, df_era5_mean, df_hres, df_crpss)
+#   }
+# 
+#   names(dfx) <- names(df_used)
+# 
+#   # Append to table
+#   df_used <- dplyr::bind_rows(df_used, dfx)
+#   saveRDS(df_used, "data/df_geff_era5_hres_crps.rds")
+# }
+
+df_used <- readRDS("../data/df_geff_era5_hres_crps.rds")
+
+# Promote data.frame to spatial
+coordinates(df_used) = ~long + lat
+
+# Add the id column to the GFED4 regions for join
+regionXFort <- fortify(BasisRegions, data = BasisRegions@data)
+regionXPoly <- merge(regionXFort, BasisRegions@data,
+                     by.x = "id", by.y = "ID")  # join data
+# Re-order factors
+regionXPoly$Region <- factor(as.character(regionXPoly$Region),
+                             levels = BasisRegions$Region)
 
 # GFED4 regions of interest
 EURO <- BasisRegions[BasisRegions$Region == "EURO",]
 TENA <- BasisRegions[BasisRegions$Region == "TENA",]
 SHSA <- BasisRegions[BasisRegions$Region == "SHSA",]
+
 # Countries of interest
 pt <- raster::getData(name = "GADM", country = "Portugal", level = 1)[-c(2,13),]
 chile <- raster::getData(name = "GADM", country = "Chile", level = 0)
 cali <- raster::getData(name = "GADM", country = "USA", level = 1)[5, ]
 
-# All the GFED4 regions
-BasisRegions_join <- BasisRegions
-# add id column for join
-BasisRegions_join@data$id <- 1:nrow(BasisRegions_join@data)
-regionXFort <- fortify(BasisRegions_join, data = BasisRegions_join@data)
-regionXPoly <- merge(regionXFort, BasisRegions_join@data,
-                     by.x = "id", by.y = "id")  # join data
-# Re-order factors
-regionXPoly$Region <- factor(as.character(regionXPoly$Region),
-                             levels = dfgfed4$Region)
+# Synop stations of interest
+crs(df_used) <- crs(BasisRegions)
+synops <- spatialEco::point.in.poly(df_used, BasisRegions)
+# saveRDS(synops, "../data/synops.rds")
 ```
 
 ```{r Figure1, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure1}GFED4 regional classification and the 3 countries selected to showcase the fire forecast performances (California, Chile, and Portugal)."}
-ggplot(aes(x = long, y = lat), data = map_data("world")) +
+ggplot(data = map_data("world"), aes(x = long, y = lat)) +
   geom_polygon(aes(group = group), fill=NA, colour = "grey65") +
   coord_equal() +  theme_bw() + xlab("Longitude") + ylab("Latitude") +
   geom_polygon(data = regionXPoly,
@@ -162,7 +295,7 @@ ggplot(aes(x = long, y = lat), data = map_data("world")) +
                     values = c("darkgrey",
                                RColorBrewer::brewer.pal(12,"Paired"),
                                "lightgrey"),
-                    labels = dfgfed4$Region) +
+                    labels = BasisRegions$Region) +
   geom_polygon(data = map_data("world", region = "Portugal"),
                aes(x = long, y = lat, group = group, colour = "Portugal"),
                fill = NA) +
@@ -172,191 +305,65 @@ ggplot(aes(x = long, y = lat), data = map_data("world")) +
   geom_polygon(data = map_data(map = "state", region = "California"),
                aes(x = long, y = lat, group = group, colour = "California"),
                fill = NA) +
+  geom_point(data = data.frame(synops), aes(x = coords.x1, y = coords.x2),
+             shape = 1, color = "gray20", size = 0.1) +
   scale_colour_manual(name = "Study areas",
                       values = c("Portugal" = "brown",
                                  "California" = "darkblue",
                                  "Chile" = "darkgreen"))
 ```
 
-\section{Results}
-
-\subsection{Skill in the FWI prediction}
-The first assessment looks at the capability of ECMWF fire forecast to reproduce the same FWI values as would be estimated from the network of local stations but 2, 6 and 10 days ahead. The selected stations (figure \ref{fig:Figure2}) have at least 30 records during 2017 at local noon and are used to perform an analysis of bias and anomaly correlation at different lead times. For comparison also FWI calculation using ERA5 is included. This provide an estimations of the limit of predictability when using forcing from model simulations in place of observed values \citep{digiuseppe:16}. As expected there is a performance degradation going towards longer lead times and mean biases are limited to few units even at day 10. However, depending on the calibration procedure adopted few units could mean a mismatch in danger level classification.  The mean absolute error  (figure \ref{fig:synop}b)  provides  information on the residual amplitudes.  FWI from reanalysis have the largest skills as expected and the mean absolute errors rapidly increases with lead times. However the distribution of MAE values clearly shows that in selected cases predictive skills can be achievable even at day 10.
-
-```{r Figure2, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure2}Spatial distribution of weather stations from the synop network  which have at least 30 observations recorded at local noon in 2017."}
-# Get data from previous publication
-# https://github.com/cvitolo/GEFF-ERA5/blob/master/data/df_all.rds
-# save them in the "../data" folder
-# Use QGIS to beautify the map
-knitr::include_graphics("../images/synops_col.png")
-```
-
-```{r prepFigure3, echo = FALSE, message = FALSE, results = 'hide', cache = TRUE}
-library("easyVerification")
-# The following code uses forecast data which is restricted.
-# A summary table is computed and saved for users at the end of this code chunk.
-# Get data from previous publication
-# https://github.com/cvitolo/GEFF-ERA5/blob/master/data/df_geff_erai_era5.rds
-# save it in the "../data" folder
-df <- readRDS(file = "../data/df_geff_erai_era5.rds")
-# insert 1-year fire season for tropics (lat = [-30, +30])
-df$season[df$lat < 30 & df$lat > -30] <- "Dry"
-# Remove wet season (we are only interested in the dry season)
-df <- df[df$season == "Dry", ]
-# How many stations remain?
-stations <- unique(df[, c("id", "lat", "long")])
-
-df$region <- sapply(strsplit(df$tzid, "/"), `[`, 1)
-df$date <- as.Date(paste0(df$yr, "-", df$mon, "-", df$day))
-df <- df[, c("id", "lat", "long", "region", "date", "OBS", "ERA5")]
-
-dates2017 <- seq.Date(from = as.Date("2017-01-01"),
-                      to = as.Date("2017-12-31"),
-                      by = "day")
-
-forecasts_folder <- "/hugetmp/FireEventsDatabase/forecasts/fwi/"
-
-df_used <- data.frame(matrix(NA, nrow = 0, ncol = 13))
-names(df_used) <- c("id", "lat", "long", "region", "date", "OBS", "ERA5",
-                    "HRES_d2", "HRES_d6", "HRES_d10", "CRPS_d2", "CRPS_d6", "CRPS_d10")
-
-for (i in seq_along(dates2017)[216:365]){
-
-  print(dates2017[i])
-  
-  # What stations have data on this date?
-  dfx <- df %>% filter(date == dates2017[i]) %>% filter(complete.cases(.))
-  # Define spatial point
-  spdf <- dfx[, c("id", "lat", "long")]
-  # Promote data.frame to spatial
-  coordinates(spdf) = ~long + lat
-  
-  # Calculate lead days
-  day2 <- dates2017[i] - 1
-  day6 <- dates2017[i] - 5
-  day10 <- dates2017[i] - 9
-
-  # Get data from HRES forecasts, e.g. ECMWF_FWI_20170101_1200_hr_fwi.nc
-  if (day10 %in% dates2017){
-    
-    # Day2
-    HRES2 <- raster::brick(file.path(forecasts_folder,
-                                     paste0("ECMWF_FWI_",
-                                            gsub("-", "",
-                                                 as.character(day2)),
-                                            "_1200_hr_fwi.nc")))[[2]]
-    dfx$HRES_d2 <- raster::extract(x = HRES2, y = spdf)
-    # Day6
-    HRES6 <- raster::brick(file.path(forecasts_folder,
-                                     paste0("ECMWF_FWI_",
-                                            gsub("-", "",
-                                                 as.character(day6)),
-                                            "_1200_hr_fwi.nc")))[[6]]
-    dfx$HRES_d6 <- raster::extract(x = HRES6, y = spdf)
-    # Day10
-    HRES10 <- raster::brick(file.path(forecasts_folder,
-                                      paste0("ECMWF_FWI_",
-                                             gsub("-", "",
-                                                  as.character(day10)),
-                                             "_1200_hr_fwi.nc")))[[10]]
-    dfx$HRES_d10 <- raster::extract(x = HRES10, y = spdf)
-    rm(HRES2, HRES6, HRES10)
-    
-    # Remove NAs
-    dfx <- dfx %>% filter(complete.cases(.))
-    # Re-define spatial point
-    spdf <- dfx[, c("id", "lat", "long")]
-    # Promote data.frame to spatial
-    coordinates(spdf) = ~long + lat
-
-    # Get data from ENS forecasts
-    nstations <- dim(spdf@data)[1]
-    mat2 <- matrix(NA, nrow = nstations, ncol = 51)
-    mat6 <- matrix(NA, nrow = nstations, ncol = 51)
-    mat10 <- matrix(NA, nrow = nstations, ncol = 51)
-    for (j in 1:51){
-    
-      # Extract the modelled FWI from ENS
-      ens_member <- sprintf("%02d", j - 1)
-      # Day2
-      ENS2 <- raster::brick(file.path(forecasts_folder,
-                                       paste0("ECMWF_FWI_",
-                                              gsub("-", "",
-                                                   as.character(day2)),
-                                              "_1200_", ens_member,
-                                              "_fwi.nc")))[[2]]
-      mat2[, j] <- raster::extract(x = ENS2, y = spdf)
-      # Day6
-      ENS6 <- raster::brick(file.path(forecasts_folder,
-                                       paste0("ECMWF_FWI_",
-                                              gsub("-", "",
-                                                   as.character(day6)),
-                                              "_1200_", ens_member,
-                                              "_fwi.nc")))[[6]]
-      mat6[, j] <- raster::extract(x = ENS6, y = spdf)
-      # Day10
-      ENS10 <- raster::brick(file.path(forecasts_folder,
-                                       paste0("ECMWF_FWI_",
-                                              gsub("-", "",
-                                                   as.character(day10)),
-                                              "_1200_", ens_member,
-                                              "_fwi.nc")))[[10]]
-      mat10[, j] <- raster::extract(x = ENS10, y = spdf)
-    }
-    # Populate CRPS for Day 2
-    dfx$CRPS_d2 <- veriApply(verifun = "EnsCrps", fcst = mat2, obs = dfx$OBS)
-    # Populate CRPS for Day 6
-    dfx$CRPS_d6 <- veriApply(verifun = "EnsCrps", fcst = mat6, obs = dfx$OBS)
-    # Populate CRPS for Day 10
-    dfx$CRPS_d10 <- veriApply(verifun = "EnsCrps", fcst = mat10, obs = dfx$OBS)
-
-    # Append to table
-    df_used <- dplyr::bind_rows(df_used, dfx)
-
-    saveRDS(df_used, "../data/df_geff_era5_hres_crps.rds")
-  }
-}
-
-df_used <- readRDS("../data/df_geff_era5_hres_crps.rds")
-```
-
-```{r Figure3, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure3}Comparison between modelled FWI and observed FWI value. FWI are calculated from using ECMWF reanalysis (ERA5) and forecasts at different lead times. The box plots are used to describe the distribution of values accross the observation points for the 2017 Mean Bias (left panel) and the 2017 mean absolute error (right panel)."}
-d <- df_used %>%
-  select(OBS, ERA5, HRES_d2, HRES_d6, HRES_d10) %>%
+```{r Figure2, echo = FALSE, fig.width = 13, fig.height = 10, out.width = "100%", fig.cap = "\\label{fig:Figure3}Comparison between modelled FWI and observed FWI value. FWI are calculated from using ECMWF reanalysis (ERA5) and forecasts at different lead times. The box plots are used to describe the distribution of values accross the observation points for the 2017 Mean Bias (left panel) and the 2017 mean absolute error (right panel)."}
+f2 <- data.frame(synops) %>%
+  group_by(Region) %>%
+  select(OBS, Region, ERA5, HRES_d1, HRES_d2, HRES_d3, HRES_d4, HRES_d5,
+         HRES_d6, HRES_d7, HRES_d8, HRES_d9, HRES_d10) %>%
+  reshape2::melt(id.vars = c("OBS", "Region")) %>%
   filter(complete.cases(.)) %>% # Remove NAs
-  reshape2::melt(id.vars = "OBS") %>%
   filter(OBS < 250, value < 250) %>%
   mutate(BIAS = OBS - value,
          MAE = abs(OBS - value)) %>%
   rename(modelled_type = variable, modelled_value = value) %>%
-  reshape2::melt(id.vars = c("fwiobs", "modelled_type", "modelled_value"))
+  reshape2::melt(id.vars = c("OBS", "Region", "modelled_type",
+                             "modelled_value"))
 
-ggplot(d, aes(x = modelled_type, y = value, fill = modelled_type)) +
-  facet_wrap( ~ variable, ncol = 2) +
-  geom_boxplot(color="black", size=0.2,  outlier.shape = NA) +
-  theme_bw() + ylim(-2, 12) +
+ggplot(f2, aes(x = modelled_type, y = value)) +
+  facet_grid(Region ~ variable) +
+  geom_boxplot(color="black", outlier.shape = NA) +
+  theme_bw() + ylim(-40, 50) +
   xlab("") + ylab("") +
-  scale_fill_discrete_qualitative() +
   theme(legend.position = "none") +
-  scale_x_discrete(labels = c("ERA5", "HRES_D2", "HRES_D6", "HRES_D10"))
+  scale_x_discrete(labels = c("ERA5", "D1", "D2", "D3",
+                              "D4", "D5", "D6", "D7",
+                              "D8", "D9", "D10"))
 ```
 
-Despite its importance  the analysis performed using the synop network is still pointwise and does not cover all the regions where fires are relevant. Moreover mean biases and MAE are based on the high resolution forecast. These skill metrics do not provide information about the performance of the ensemble forecasting as a whole. 
+Despite its importance the analysis performed using the synop network is still pointwise and does not cover all the regions where fires are relevant. Moreover mean biases and MAE are based on the high resolution forecast. These skill metrics do not provide information about the performance of the ensemble forecasting as a whole. 
 
-```{r Figure4, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure4}PUT here crps skills scores."}
-d <- df_used %>%
-  select(region, CRPS_d2, CRPS_d6, CRPS_d10) %>%
-  rename(Region = region, Day2 = CRPS_d2, Day6 = CRPS_d6, Day10 = CRPS_d10) %>%
+```{r Figure3, echo = FALSE, fig.width = 13, fig.height = 6, out.width = "100%", fig.cap = "\\label{fig:Figure4}PUT here crps skills scores."}
+f3 <- data.frame(synops) %>%
+  select(Region, CRPS_d1, CRPS_d2, CRPS_d3, CRPS_d4, CRPS_d5, CRPS_d6,
+         CRPS_d7, CRPS_d8, CRPS_d9, CRPS_d10) %>%
   reshape2::melt(id.vars = "Region") %>%
   filter(complete.cases(.)) %>%
   rename(CRPS = value) %>%
   group_by(Region, variable) %>%
   summarise(CRPS = mean(CRPS))
 
-ggplot(d, aes(x = variable, y = CRPS, colour = Region)) +
+f3$variable <- as.numeric(f3$variable)
+f3$Region <- factor(f3$Region)
+
+ggplot(f3, aes(x = variable, y = CRPS, colour = Region)) +
+  geom_line() +
   geom_point() +
-  xlab("") +
-  scale_fill_manual(name="Region")
+  xlab("Lead time") +
+  theme_bw() +
+  scale_x_discrete(limits = 1:10) +
+  scale_colour_manual(name="Regions",
+                      values = c("darkgrey",
+                                 RColorBrewer::brewer.pal(12,"Paired"),
+                                 "lightgrey"),
+                      labels = BasisRegions$Region)
 ```
 
 \subsection{Skill in detecting fire events}
@@ -365,7 +372,61 @@ Conventionally, we assume that an active fire is correctly predicted if the FWI 
 
 At day 2, high latitudes are characterized by POD greater than or equal to 0.5. These are mostly temperate regions where vegetation is dominated by forests and fuel is abundant and where fire danger is moisture limited. In these regions the FWI is a good predictor of fire danger \citep{digiuseppe:16}. It has to be noted that the FWI does not take into account management measures that could introduce a relevant number of "false-alarm". Central America, the Middle East and the northern hemisphere areas, Africa are characterized by a POD in the range 0.3-0.4 as in most of the tropics, where, fires usually occur in grass-shrub lands. Here fuel is scarce and weather plays a less relevant controlling role. Also it has to be noted that  the statistics here are likely to be contaminated by  many agricultural and prescribed fires that are considered “events” and which would dilute some of the skill in regions where annual cropland is high or are heavily managed. The spatial distribution of POD at day 6 is very similar to the corresponding figures at day 2, just slightly shifted towards lower values. 
 
-One important exception is the extremely good performance of the fire forecast in Equatorial Asia where the system seems to have a predictability of 0.9 even at day 6. Also \citet{degroot:07} highlighted how FWI is not a good indicator in this area and a fire early warning system should mostly rely on the drought code. Still, there are factors  that could contribute to this enhanced predictability. First fires in this region are mainly caused by humans for the purposes of cleaning the land for establishing plantations \citep{field:09,benedetti:16}. Therefore they occur every season as soon as fuel conditions are favorable and the ignition is less of a stochastic component. This also means that the POD statistics are built on a much higher number of events. Moreover, the strength and prevalence of these fires are strongly influenced by large-scale climate patterns like El Ni{\~n}o \cite{field:04} which have been proven being highly predictable \citep{zhu:15}. The other relevant fact is the almost null skill globally when a climatological FWI is used highlighting the added benefit of a forecasting system  
+One important exception is the extremely good performance of the fire forecast in Equatorial Asia where the system seems to have a predictability of 0.9 even at day 6. Also \citet{degroot:07} highlighted how FWI is not a good indicator in this area and a fire early warning system should mostly rely on the drought code. Still, there are factors  that could contribute to this enhanced predictability. First fires in this region are mainly caused by humans for the purposes of cleaning the land for establishing plantations \citep{field:09,benedetti:16}. Therefore they occur every season as soon as fuel conditions are favorable and the ignition is less of a stochastic component. This also means that the POD statistics are built on a much higher number of events. Moreover, the strength and prevalence of these fires are strongly influenced by large-scale climate patterns like El Ni{\~n}o \cite{field:04} which have been proven being highly predictable \citep{zhu:15}. The other relevant fact is the almost null skill globally when a climatological FWI is used highlighting the added benefit of a forecasting system
+
+```{r prepFig4, echo = FALSE, message = FALSE, results = 'hide', cache = TRUE}
+# Get ERA5
+ERA5 <- brick("/scratch/rd/nen/perClaudia/era5/fwi_1980_2019.nc")
+# Get FRP
+FRP <- raster::brick("/scratch/rd/nen/perClaudia/CAMS/CAMS_2017-01-01_2017-12-31_frpfire.nc")
+myfilelist <- list.files(path = forecasts_folder,
+                        pattern = "*hr",
+                        full.names = TRUE)
+
+library(doSNOW)
+ncores <- parallel::detectCores() - 1
+cl <- makeCluster(ncores)
+registerDoSNOW(cl)
+iterations <- 365
+pb <- txtProgressBar(max = iterations, style = 3)
+progress <- function(n) setTxtProgressBar(pb, n)
+opts <- list(progress = progress)
+result <- foreach(i = 1:iterations, .combine = rbind, 
+                  .options.snow = opts) %dopar%
+{
+    # Get FRP for 2017, keep only major fires (values above 0.5)
+  frpx <- raster::rotate(FRP[[i]])
+  p <- raster::rasterToPoints(frpx, fun = function(x){x > 0.5})
+  spdf <- data.frame(p)
+  spdf$date <- dates2017[i]
+  names(spdf) <- c("long", "lat", "frp", "date")
+  sp::coordinates(spdf) <- ~long + lat
+  
+  # Get HRES for 2017, where FRP is above 0.5
+  hres <- raster::rotate(raster::brick(myfilelist[[i]]))
+  x <- raster::extract(x = hres, y = spdf)
+  x <- data.frame(x)
+  names(x) <- paste0("Day", 1:10)
+  
+  # Get ERA5 to calculate the very high warning levels
+  very_high <- caliver::daily_clima(r = ERA5, dates = dates2017[i], probs = 0.95)
+  thr95 <- raster::extract(x = very_high, y = spdf)
+
+  # Append results to table
+  df <- cbind(spdf@coords, spdf@data, x, thr95)
+  df <- df[complete.cases(df), ]
+  return(df)
+}
+close(pb)
+stopCluster(cl)
+# saveRDS(result, "data/PODdataframe.rds")
+
+# FRP locations of interest
+sp::coordinates(result) <- ~long + lat
+crs(result) <- crs(BasisRegions)
+fires <- spatialEco::point.in.poly(result, BasisRegions)
+# saveRDS(fires, "data/fires.rds")
+```
 
 ```
 \begin{figure}[htb]
