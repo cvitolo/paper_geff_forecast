@@ -227,8 +227,7 @@ detection of fire during one year of operation in 2017. As the Fire
 Weather Index is the main index of this system we will concentrate on
 this model component.
 
-\subsection{FWI calculation}
-\subsubsection{General concept}
+\subsection{FWI calculation}\subsubsection{General concept}
 
 The Fire Weather Index system is composed of six variables describing
 fuel moisture and fire behavior, as influenced by weather
@@ -369,17 +368,21 @@ observations in the evaluation. To asses the quality of the computation
 we use traditional deterministic skill scores such as the mean bias (MB)
 and the mean absolute error (MAE). For a probabilistic assessment, the
 continuous ranked probability score is also employed (CRPS;
-\cite{hersbach2000}). These are defined as: \begin{align}
+\cite{hersbach2000}). These are defined as:
+
+\begin{align}
 MB&=\sum_{p=1}^{cases}\left[F_{n=HRES}-O\right]\\
 MAE&=\frac{1}{cases}\sum_{p=1}^{cases}\sqrt{\left[(F_{n=HRES}-O)^2]\right]}\\
 CRPS=\frac{1}{cases}\sum_{t=1}^{cases}\int_{-\inf}^{+\inf}\left[F_{n}-O)^2\right]dn
-\end{align} where F is the forecast at time step t of N number of
-forecasts and O is the observed value. While the MB, MAE and the ACC are
-applied to a single forecasts, the high resolution forecast, the CRPS
-takes into account the whole distribution of possible values predicted
-by the ensemble. It is the continuous extension of the ranked
-probability score, where \(F_n\) is the cumulative distribution function
-of the predicted ensemble values. Then, the CRPS compares the cumulative
+\end{align}
+
+where F is the forecast at time step t of N number of forecasts and O is
+the observed value. While the MB, MAE and the ACC are applied to a
+single forecasts, the high resolution forecast, the CRPS takes into
+account the whole distribution of possible values predicted by the
+ensemble. It is the continuous extension of the ranked probability
+score, where \(F_n\) is the cumulative distribution function of the
+predicted ensemble values. Then, the CRPS compares the cumulative
 probability distribution of the FWI forecasted by the ensemble forecast
 system to the observation. In this sense the CRPS is sensitive to the
 mean forecast biases as well as the spread of the ensemble
@@ -433,10 +436,6 @@ which experience recurrent intense fire episodes and saw major events
 taking place in 2017 (Figure \ref{fig:Figure1}). Events in these
 locations are also analyzed in detail.
 
-\begin{figure}
-\includegraphics[width=1\linewidth]{article_files/figure-latex/Figure1-1} \caption{\label{fig:Figure1}GFED4 regional classification and the 3 countries selected to showcase the fire forecast performances (California, Chile, and Portugal).}\label{fig:Figure1}
-\end{figure}
-
 \section{Results}
 
 \subsection{Skill in the FWI prediction}
@@ -460,15 +459,15 @@ However the distribution of MAE values clearly shows that in selected
 cases predictive skills can be achievable even at day 10.
 
 \begin{figure}
-\includegraphics[width=1\linewidth]{../images/synops_col} \caption{\label{fig:Figure2}Spatial distribution of weather stations from the synop network  which have at least 30 observations recorded at local noon in 2017.}\label{fig:Figure2}
+\includegraphics[width=1\linewidth]{article_files/figure-latex/Figure1-1} \caption{\label{fig:Figure1}GFED4 regional classification and the 3 countries selected to showcase the fire forecast performances (California, Chile, and Portugal).}\label{fig:Figure1}
 \end{figure}
 
 \begin{verbatim}
-## Warning: Removed 958035 rows containing non-finite values (stat_boxplot).
+## Warning: Removed 104425 rows containing non-finite values (stat_boxplot).
 \end{verbatim}
 
 \begin{figure}
-\includegraphics[width=1\linewidth]{article_files/figure-latex/Figure3-1} \caption{\label{fig:Figure3}Comparison between modelled FWI and observed FWI value. FWI are calculated from using ECMWF reanalysis (ERA5) and forecasts at different lead times. The box plots are used to describe the distribution of values accross the observation points for the 2017 Mean Bias (left panel) and the 2017 mean absolute error (right panel).}\label{fig:Figure3}
+\includegraphics[width=1\linewidth]{article_files/figure-latex/Figure2-1} \caption{\label{fig:Figure3}Comparison between modelled FWI and observed FWI value. FWI are calculated from using ECMWF reanalysis (ERA5) and forecasts at different lead times. The box plots are used to describe the distribution of values accross the observation points for the 2017 Mean Bias (left panel) and the 2017 mean absolute error (right panel).}\label{fig:Figure2}
 \end{figure}
 
 Despite its importance the analysis performed using the synop network is
@@ -477,7 +476,11 @@ relevant. Moreover mean biases and MAE are based on the high resolution
 forecast. These skill metrics do not provide information about the
 performance of the ensemble forecasting as a whole.
 
-\subsection{ Skill in detecting fire events}
+\begin{figure}
+\includegraphics[width=1\linewidth]{article_files/figure-latex/Figure4-1} \caption{\label{fig:Figure4}PUT here crps skills scores.}\label{fig:Figure4}
+\end{figure}
+
+\subsection{Skill in detecting fire events}
 
 Conventionally, we assume that an active fire is correctly predicted if
 the FWI is greater than the 95\(^{th}\) percentile of its distribution
