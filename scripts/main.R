@@ -1,103 +1,198 @@
+# SET UP #######################################################################
 # Install caliver from GitHub
-install.packages("devtools", repos = "http://cran.rstudio.com")
-devtools::install_github("ecmwf/caliver")
+# install.packages("devtools", repos = "http://cran.rstudio.com")
+# devtools::install_github("ecmwf/caliver")
 
 # Load relevant packages
+library("ncdf4")
 library("caliver")
 library("raster")
 library("ggplot2")
-library("verification")
 library("rowr")
 library("dplyr")
 library("rgeos")
 library("maptools")
 library("sp")
+library("sf")
 library("RColorBrewer")
 library("stringr")
 library("colorspace")
+library("easyVerification")
+library("spatialEco")
+library("doSNOW")
+library("parallel")
+library("gplots")
+library("viridis")
+library("hrbrthemes")
 
-## Get GFED4 regions and countries of interest
-dfgfed4 <- data.frame(ID = 1:14,
-                      Region = c("BONA", "TENA", "CEAM", "NHSA", "SHSA", "EURO",
-                                 "MIDE", "NHAF", "SHAF", "BOAS", "CEAS", "SEAS",
-                                 "EQAS", "AUST"),
-                      Zone = c("north", "north", "tropics", "tropics", "south",
-                               "north", "north", "tropics", "south", "north",
-                               "north", "tropics", "tropics", "south"),
-                      stringsAsFactors = FALSE)
+ratioWH <- 1.77
+W <- 10
+H <- W/ratioWH
 
-BasisRegions <- caliver::get_gfed4(varname = "BasisRegions")
-simplepolys <- maptools::unionSpatialPolygons(BasisRegions, BasisRegions$layer)
-BasisRegions <- SpatialPolygonsDataFrame(Sr = simplepolys[as.character(1:14)],
-                                         data = dfgfed4)
-saveRDS(object = dfgfed4, file = "data/dfgfed4.rds")
-saveRDS(object = BasisRegions, file = "data/BasisRegions_simplified.rds")
-rm(simplepolys)
-# dfgfed4 <- readRDS("dfgfed4.rds")
-# BasisRegions <- readRDS("BasisRegions_simplified.rds")
+# ggsave(filename = "images/x.eps", plot = last_plot(),
+#        width = W, height = H, units = "in",
+#        device = cairo_ps, fallback_resolution = 600)
+
+forecasts_folder <- "/hugetmp/forecasts/hres/2017"
+
+dates2017 <- seq.Date(from = as.Date("2017-01-01"),
+                      to = as.Date("2017-12-31"),
+                      by = "day")
+
+datesERA5 <- seq.Date(from = as.Date("1980-01-01"),
+                      to = as.Date("2019-06-30"),
+                      by = "day")
+
+# Get all GFED4 regions
+BasisRegions <- readRDS("data/BasisRegions_simplified.rds")
+
+# Add the id column to the GFED4 regions for join
+regionXFort <- fortify(BasisRegions, data = BasisRegions@data)
+regionXPoly <- merge(regionXFort, BasisRegions@data,
+                     by.x = "id", by.y = "ID")  # join data
+# Re-order factors
+regionXPoly$Region <- factor(as.character(regionXPoly$Region),
+                             levels = BasisRegions$Region)
 
 # GFED4 regions of interest
 EURO <- BasisRegions[BasisRegions$Region == "EURO",]
 TENA <- BasisRegions[BasisRegions$Region == "TENA",]
 SHSA <- BasisRegions[BasisRegions$Region == "SHSA",]
+
 # Countries of interest
 pt <- raster::getData(name = "GADM", country = "Portugal", level = 1)[-c(2,13),]
 chile <- raster::getData(name = "GADM", country = "Chile", level = 0)
-cali <- raster::getData(name = "GADM", country = "USA", level = 1)[5, ] # cali
+cali <- raster::getData(name = "GADM", country = "USA", level = 1)[5, ]
 
-################################################################################
-## Calculate fire danger threshold maps for selected countries #################
-################################################################################
+# DATA PREPARATION #############################################################
 
-#### FWI based on ERA5 reanalysis data (1980-2018) - 44.3GB!
-FWI <- brick("/scratch/rd/nen/perClaudia/era5/fwi.nc")
+# The following code uses forecast data which is restricted.
+# A summary table is computed and saved for users at the end of this code chunk.
+#
+# Get data from previous publication
+# https://github.com/cvitolo/GEFF-ERA5/blob/master/data/df_geff_erai_era5.rds
+# save it in the "../data" folder
+df <- readRDS(file = "data/df_geff_erai_era5.rds")
+# insert 1-year fire season for tropics (lat = [-30, +30])
+df$season[df$lat < 30 & df$lat > -30] <- "Dry"
+# Remove wet season (we are only interested in the dry season)
+df <- df[df$season == "Dry", ]
+# How many stations remain?
+stations <- unique(df[, c("id", "lat", "long")])
 
-# Get dates for 2017
-dates_2017 <- which(substr(x = names(FWI), start = 2, stop = 5) == 2017)
+df$region <- sapply(strsplit(df$tzid, "/"), `[`, 1)
+df$date <- as.Date(paste0(df$yr, "-", df$mon, "-", df$day))
+df <- df[, c("id", "lat", "long", "region", "date", "OBS", "ERA5")]
 
-# Select only dates in 2017
-system(paste0("cdo seltimestep,",
-              paste(dates_2017[c(1, length(dates_2017))], collapse = "/"),
-              " /scratch/rd/nen/perClaudia/era5/fwi.nc data/fwi_era5_2017.nc"))
+days_2017 <- which(datesERA5 %in% c(dates2017, tail(dates2017)[6] + 1:9))
+# system(paste0("cdo seltimestep,", paste0(days_2017, collapse = ","),
+#                   " /scratch/rd/nen/perClaudia/era5/fwi_1980_2019.nc ",
+#                   "/scratch/rd/nen/perClaudia/era5/fwi_2017_dayx.nc"),
+#            ignore.stderr = TRUE)
+ERA5_2017 <- raster::brick("/scratch/rd/nen/perClaudia/era5/fwi_2017_dayx.nc")
 
-# Select only dates up to 2016
-system(paste0("cdo seltimestep,1/", dates_2017[1] - 1,
-              " /scratch/rd/nen/perClaudia/era5/fwi.nc data/fwi_era5_1980_2016.nc"))
+for (i in seq_along(dates2017)) {
 
-# Mean Year = CLIM (one map per day of the year)
-system("cdo ydaymean data/fwi_era5_1980_2016.nc data/fwi_era5_1980_2016_mean.nc")
+  issue_date <- dates2017[i]
 
-# Better to crop then calculate the 95th percentile!
+  # What stations have data on this date?
+  dfx <- dplyr::filter(.data = df, date == issue_date)
+  dfx <- dfx[complete.cases(dfx), ]
 
-### Portugal ### round(extent(pt), 2)
-system("cdo sellonlatbox,-9.55,-6.19,36.96,42.15 data/fwi_era5_1980_2016.nc data/fwi_era5_1980_2016_pt.nc")
-# 95th percentile threshold maps (one map per day of the year)
-system("cdo ydaypctl,95 data/fwi_era5_1980_2016_pt.nc -ydaymin data/fwi_era5_1980_2016_pt.nc -ydaymax data/fwi_era5_1980_2016_pt.nc data/fwi_era5_1980_2016_pt_95th.nc")
+  # Define spatial point
+  spdf <- sf::st_as_sf(x = dfx, coords = c("long", "lat"), crs = 4326)
 
-### Chile ### round(extent(chile), 2)
-system("cdo sellonlatbox,-109.45,-66.41,-55.98,-17.51 data/fwi_era5_1980_2016.nc data/fwi_era5_1980_2016_chile.nc")
-# 95th percentile threshold maps (one map per day of the year)
-system("cdo ydaypctl,95 data/fwi_era5_1980_2016_chile.nc -ydaymin data/fwi_era5_1980_2016_chile.nc -ydaymax data/fwi_era5_1980_2016_chile.nc data/fwi_era5_1980_2016_chile_95th.nc")
+  # Get HRES
+  message(paste("Handling HRES for", issue_date))
+  HRES <- raster::brick(file.path(forecasts_folder,
+                                  paste0("ECMWF_FWI_",
+                                         gsub("-", "",
+                                              as.character(issue_date)),
+                                         "_1200_hr_fwi.nc")))
+  # HRES needs to be rotated
+  df_hres <- raster::extract(x = raster::rotate(HRES), y = spdf)
+  dfx <- cbind(dfx, df_hres)
+  names(dfx)[8:17] <- paste0("HRES_d", 1:10)
 
-### California ### round(extent(cali), 2)
-system("cdo sellonlatbox,-124.42,-114.13,32.53,42.01 data/fwi_era5_1980_2016.nc data/fwi_era5_1980_2016_cali.nc")
-# 95th percentile threshold maps (one map per day of the year)
-system("cdo ydaypctl,95 data/fwi_era5_1980_2016_cali.nc -ydaymin data/fwi_era5_1980_2016_cali.nc -ydaymax data/fwi_era5_1980_2016_cali.nc data/fwi_era5_1980_2016_cali_95th.nc")
+  # Get ENS
+  arr_ens <- array(NA, dim = c(dim(spdf)[1], 10, 51))
+  message(paste("Handling ENS for", issue_date))
+  for (j in 1:51){
+    # Extract the modelled FWI from ENS
+    ens_member <- sprintf("%02d", j - 1)
+    ENS <- raster::brick(file.path(forecasts_folder,
+                                   paste0("ECMWF_FWI_",
+                                          gsub("-", "",
+                                               as.character(issue_date)),
+                                          "_1200_", ens_member,
+                                          "_fwi.nc")))[[1:10]]
+    arr_ens[, , j] <- raster::extract(x = raster::rotate(ENS), y = spdf)
+  }
 
-### FIGURE 1 ###################################################################
+  # Get ERA5 data for 2017 - to be used as observation
+  message(paste("Handling ERA5 for", issue_date, "plus 9 days"))
+  ERA5_2017_day <- ERA5_2017[[which(dates2017 %in% issue_date) + 0:9]]
+  day_in_2017 <- raster::extract(x = ERA5_2017_day, y = spdf)
 
-# All the GFED4 regions
-BasisRegions_join <- BasisRegions
-# add id column for join
-BasisRegions_join@data$id <- 1:nrow(BasisRegions_join@data)
-regionXFort <- fortify(BasisRegions_join, data = BasisRegions_join@data)
-regionXPoly <- merge(regionXFort, BasisRegions_join@data,
-                     by.x = "id", by.y = "id")  # join data
-# Re-order factors
-regionXPoly$Region <- factor(as.character(regionXPoly$Region),
-                             levels = dfgfed4$Region)
+  for (leadtime in 1:10){
 
-worldcountries <- ggplot(aes(x = long, y = lat), data = map_data("world")) +
+    lead_day <- issue_date + leadtime - 1
+
+    # Extract ERA5 from all the years (same month and day), excluding 2017
+    idx_in_datesERA5 <- which(format(datesERA5, "%m-%d") %in%
+                                format(lead_day, "%m-%d") &
+                                lubridate::year(datesERA5) != "2017")
+    system(paste0("cdo seltimestep,", paste0(idx_in_datesERA5, collapse = ","),
+                  " /scratch/rd/nen/perClaudia/era5/fwi_1980_2019.nc ",
+                  "/scratch/rd/nen/perClaudia/era5/fwi_1980_2019_lead_day.nc"),
+           ignore.stderr = TRUE)
+    ERA5 <- raster::brick("/scratch/rd/nen/perClaudia/era5/fwi_1980_2019_lead_day.nc")
+
+    # ERA5 was stored with longitudes already rotated to [-180, +180],
+    # HRES and ENS will need to be rotated
+    df_era5_39 <- raster::extract(x = ERA5, y = spdf)
+    # Sample ERA5 to get 51 random ensemble members
+    df_era5_51 <- df_era5_39[, sample(x = 1:dim(df_era5_39)[2],
+                                      size = 51, replace = TRUE)]
+
+    # Populate CRPS
+    crps_fc <- easyVerification::veriApply(verifun = 'EnsCrps',
+                                           fcst = arr_ens[, leadtime,],
+                                           obs = day_in_2017[, leadtime])
+    crps_clim <- easyVerification::veriApply(verifun = 'EnsCrps',
+                                             fcst = df_era5_51,
+                                             obs = day_in_2017[, leadtime])
+    crpss <- 1 - crps_fc/crps_clim
+
+    dfx <- cbind(dfx, crps_fc, crps_clim, crpss)
+  }
+  names(dfx)[18:47] <- paste0(c("CRPS_fc_d", "CRPS_clim_d", "CRPSS_d"),
+                              rep(1:10, each = 3))
+
+  if (i == 1) {
+    result <- dfx
+  }else{
+    result <- rbind(result, dfx)
+  }
+
+  saveRDS(result, "data/df_geff_era5_hres_crps.rds")
+
+}
+
+# result <- readRDS("data/df_geff_era5_hres_crps.rds")
+
+# Remove rows with NAs and update spatial points
+rows2remove <- which(rowSums(is.na(result)) > 0)
+if (length(rows2remove) > 0) result <- result[-rows2remove, ]
+
+# Define spatial point
+spdf <- sf::st_as_sf(x = result, coords = c("long", "lat"), crs = 4326)
+
+synops <- spatialEco::point.in.poly(spdf, BasisRegions)
+
+# FIGURE 1 #####################################################################
+
+ggplot(data = map_data("world"), aes(x = long, y = lat)) +
   geom_polygon(aes(group = group), fill=NA, colour = "grey65") +
   coord_equal() +  theme_bw() + xlab("Longitude") + ylab("Latitude") +
   geom_polygon(data = regionXPoly,
@@ -107,7 +202,7 @@ worldcountries <- ggplot(aes(x = long, y = lat), data = map_data("world")) +
                     values = c("darkgrey",
                                RColorBrewer::brewer.pal(12,"Paired"),
                                "lightgrey"),
-                    labels = dfgfed4$Region) +
+                    labels = BasisRegions$Region) +
   geom_polygon(data = map_data("world", region = "Portugal"),
                aes(x = long, y = lat, group = group, colour = "Portugal"),
                fill = NA) +
@@ -117,1106 +212,446 @@ worldcountries <- ggplot(aes(x = long, y = lat), data = map_data("world")) +
   geom_polygon(data = map_data(map = "state", region = "California"),
                aes(x = long, y = lat, group = group, colour = "California"),
                fill = NA) +
+  geom_point(data = data.frame(synops), aes(x = coords.x1, y = coords.x2),
+             shape = 1, color = "gray20", size = 0.1) +
   scale_colour_manual(name = "Study areas",
                       values = c("Portugal" = "brown",
                                  "California" = "darkblue",
                                  "Chile" = "darkgreen"))
 
-ggsave(file = "figures/world.png", plot = worldcountries,
-       width = 10.5, height = 7.5)
+ggsave(filename = "images/Figure01.eps", plot = last_plot(),
+       width = 1.5*W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
 
-rm(list = ls())
+# FIGURE 2 #####################################################################
 
-### FIGURE 2 ###################################################################
+f2 <- data.frame(synops) %>%
+  group_by(Region) %>%
+  select(OBS, Region, ERA5, HRES_d1, HRES_d2, HRES_d3, HRES_d4, HRES_d5,
+         HRES_d6, HRES_d7, HRES_d8, HRES_d9, HRES_d10) %>%
+  reshape2::melt(id.vars = c("OBS", "Region")) %>%
+  filter(complete.cases(.)) %>% # Remove NAs
+  filter(OBS < 250, value < 250) %>%
+  mutate(BIAS = OBS - value,
+         MAE = abs(OBS - value)) %>%
+  rename(modelled_type = variable, modelled_value = value) %>%
+  reshape2::melt(id.vars = c("OBS", "Region", "modelled_type",
+                             "modelled_value"))
 
-# This was made in QGIS, point vector: /hugetmp/repos/GEFF-ERA5/data/df_all.rds
+ggplot(f2, aes(x = modelled_type, y = value)) +
+  facet_grid(Region ~ variable) +
+  geom_boxplot(color="black", outlier.shape = NA) +
+  theme_bw() + ylim(-40, 50) +
+  xlab("") + ylab("") +
+  theme(legend.position = "none") +
+  scale_x_discrete(labels = c("ERA5", "D1", "D2", "D3",
+                              "D4", "D5", "D6", "D7",
+                              "D8", "D9", "D10"))
 
-### Figure 3 ###################################################################
+ggsave(filename = "images/Figure02.eps", plot = last_plot(),
+       width = W, height = 2*H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
 
-## Compare SYNOP worldwide
-df <- readRDS("/hugetmp/repos/GEFF-ERA5/data/df_geff_erai_era5.rds")
-stations <- unique(df[, c("id", "lat", "long")])
+# FIGURE 3 #####################################################################
 
-dates2017 <- seq.Date(from = as.Date("2017-01-01"),
-                      to = as.Date("2017-12-31"),
-                      by = "day")
+f3a <- data.frame(synops) %>%
+  select(Region, CRPS_fc_d1, CRPS_fc_d2, CRPS_fc_d3, CRPS_fc_d4, CRPS_fc_d5, CRPS_fc_d6,
+         CRPS_fc_d7, CRPS_fc_d8, CRPS_fc_d9, CRPS_fc_d10) %>%
+  reshape2::melt(id.vars = "Region") %>%
+  filter(complete.cases(.)) %>%
+  rename(CRPS = value) %>%
+  group_by(Region, variable) %>%
+  summarise(CRPS = mean(CRPS))
 
-# Get forecasts for day 2-6-10
-day2FWI <- raster::stack()
-day6FWI <- raster::stack()
-day10FWI <- raster::stack()
-for (file in list.files(path = "/hugetmp/FireEventsDatabase/fwi2017/ffwi_rotated",
-                        pattern = "*hr.nc", full.names = TRUE)){
-  print(file)
-  x <- raster::brick(file)
-  day2FWI <- raster::stack(day2FWI, x[[2]])
-  day6FWI <- raster::stack(day6FWI, x[[6]])
-  day10FWI <- raster::stack(day10FWI, x[[10]])
-}
+f3a$variable <- as.numeric(f3a$variable)
+f3a$Region <- factor(f3a$Region)
 
-writeRaster(day2FWI, filename = "data/day2FWI.nc", format = "CDF", overwrite = TRUE)
-writeRaster(day6FWI, filename = "data/day6FWI.nc", format = "CDF", overwrite = TRUE)
-writeRaster(day10FWI, filename = "data/day10FWI.nc", format = "CDF", overwrite = TRUE)
+ggplot(f3a, aes(x = variable, y = CRPS, colour = Region)) +
+  geom_line() +
+  geom_point() +
+  xlab("Lead time") +
+  theme_bw() +
+  scale_x_discrete(limits = 1:10) +
+  scale_colour_manual(name="Regions",
+                      values = c("darkgrey",
+                                 RColorBrewer::brewer.pal(12,"Paired"),
+                                 "lightgrey"),
+                      labels = BasisRegions$Region)
 
-df_used <- data.frame(matrix(NA, nrow = 0, ncol = 18))
-names(df_used) <- c("id", "lat", "long", "tzid", "season", "yr", "mon", "day",
-                    "temp", "prec", "rh", "ws", "OBS", "ERAI", "ERA5",
-                    "HRES_d2", "HRES_d6", "HRES_d10")
-for (i in seq_along(stations$id)){
+f3b <- data.frame(synops) %>%
+  filter(complete.cases(.)) %>%
+  select(paste0(c("CRPS_fc_d", "CRPS_clim_d"), rep(1:10, each = 2))) %>%
+  reshape2::melt(id.vars = c("CRPS_clim_d1", "CRPS_clim_d2", "CRPS_clim_d3",
+                             "CRPS_clim_d4", "CRPS_clim_d5", "CRPS_clim_d6",
+                             "CRPS_clim_d7", "CRPS_clim_d8", "CRPS_clim_d9",
+                             "CRPS_clim_d10")) %>%
+  rename(CRPS_fc = value) %>%
+  rename(fc_name = variable) %>%
+  reshape2::melt(id.vars = c("fc_name", "CRPS_fc")) %>%
+  rename(CRPS_clim = value) %>%
+  rename(clim_name = variable) %>%
+  group_by(fc_name, clim_name) %>%
+  summarise(CRPS_fc = mean(CRPS_fc),
+            CRPS_clim = mean(CRPS_clim))
 
-  # We filter over the station
-  dfx <- df %>% filter(id == stations$id[i],
-                       lat == stations$lat[i],
-                       long == stations$long[i])
-  print(paste(i, dim(dfx)[1]))
+f3b$fc_name <- as.numeric(f3b$fc_name)
+f3b$clim_name <- as.numeric(f3b$clim_name)
 
-  if (dim(dfx)[1] >= 30){
-    # Calculate the observed FWI
-    initial_condition <- data.frame(ffmc = 85, dmc = 6, dc = 15,
-                                    lat = dfx$lat[1])
-    dfx$fwiobs <- cffdrs::fwi(input = dfx,
-                              init = initial_condition,
-                              out = "fwi")$FWI
+ggplot(f3b) +
+  geom_line(aes(x = fc_name, y = CRPS_fc, col = "Forecast"), size = 2) +
+  geom_line(aes(x = clim_name, y = CRPS_clim, col = "Climatology"), size = 2) +
+  xlab("Lead time") + ylab("CRPS") +
+  scale_color_discrete(name = "") +
+  theme_bw() +
+  scale_x_discrete(limits = 1:10) +
+  theme(text = element_text(size = 15))
 
-    # Define spatial point
-    spdf <- dfx[1, ]
-    # Promote data.frame to spatial
-    coordinates(spdf) = ~long + lat
+ggsave(filename = "images/Figure03.eps", plot = last_plot(),
+       width = W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
 
-    # Select timestamp
-    mytimestamps <- which(dates2017 %in%
-                            as.Date(paste0(dfx$yr, "-",
-                                           sprintf("%02d", dfx$mon), "-",
-                                           sprintf("%02d", dfx$day))))
+# FIGURE 4 #####################################################################
 
-    # test
-    # raster::plot(day2FWI[[1]], ylim = c(70, 72), xlim = c(-10, 0))
-    # plot(spdf, add = TRUE)
+f4 <- data.frame(synops) %>%
+  filter(complete.cases(.)) %>%
+  select(Region, paste0(c("CRPS_fc_d", "CRPS_clim_d"), rep(1:10, each = 2))) %>%
+  reshape2::melt(id.vars = c("Region",
+                             "CRPS_clim_d1", "CRPS_clim_d2", "CRPS_clim_d3",
+                             "CRPS_clim_d4", "CRPS_clim_d5", "CRPS_clim_d6",
+                             "CRPS_clim_d7", "CRPS_clim_d8", "CRPS_clim_d9",
+                             "CRPS_clim_d10")) %>%
+  rename(CRPS_fc = value) %>%
+  rename(fc_name = variable) %>%
+  reshape2::melt(id.vars = c("Region", "fc_name", "CRPS_fc")) %>%
+  rename(CRPS_clim = value) %>%
+  rename(clim_name = variable) %>%
+  group_by(Region, fc_name, clim_name) %>%
+  summarise(CRPS_fc = mean(CRPS_fc),
+            CRPS_clim = mean(CRPS_clim))
 
-    # Extract the threshold from ERA5 clima
+f4$fc_name <- as.numeric(f4$fc_name)
+f4$clim_name <- as.numeric(f4$clim_name)
+f4$Region <- factor(f4$Region)
 
+ggplot(f4) +
+  geom_line(aes(x = fc_name, y = CRPS_fc, col = "Forecast")) +
+  geom_line(aes(x = clim_name, y = CRPS_clim, col = "Climatology")) +
+  facet_wrap( ~ Region, ncol = 2, scales = "free_y") +
+  xlab("Lead time") + ylab("CRPS") +
+  scale_color_discrete(name = "") +
+  theme_bw() +
+  scale_x_discrete(limits = 1:10)
 
-    # Extract the modelled FWI from HRES day 2
-    temp_d2 <- t(raster::extract(x = day2FWI, y = spdf))
-    dfx$HRES_d2 <- temp_d2[mytimestamps]
+ggsave(filename = "images/Figure04.eps", plot = last_plot(),
+       width = W, height = 2*H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
 
-    # Extract the modelled FWI from HRES day 6
-    temp_d6 <- t(raster::extract(x = day6FWI, y = spdf))
-    dfx$HRES_d6 <- temp_d6[mytimestamps]
+# PREPARATION FIGURE 5-6 #######################################################
 
-    # Extract the modelled FWI from HRES day 10
-    temp_d10 <- t(raster::extract(x = day10FWI, y = spdf))
-    dfx$HRES_d10 <- temp_d10[mytimestamps]
+# Get ERA5
+ERA5 <- raster::brick("/scratch/rd/nen/perClaudia/era5/fwi_1980_2019.nc")
+# Get FRP
+FRP <- raster::brick("/scratch/rd/nen/perClaudia/CAMS/CAMS_2017-01-01_2017-12-31_frpfire.nc")
+myfilelist <- list.files(path = forecasts_folder,
+                         pattern = "*hr",
+                         full.names = TRUE)
 
-    df_used <- dplyr::bind_rows(df_used, dfx)
-    rm(mytimestamps, temp_d2, temp_d6, temp_d10, initial_condition, dfx)
+ncores <- parallel::detectCores() - 1
+cl <- makeCluster(ncores)
+registerDoSNOW(cl)
+iterations <- 365
+pb <- txtProgressBar(max = iterations, style = 3)
+progress <- function(n) setTxtProgressBar(pb, n)
+opts <- list(progress = progress)
+result <- foreach(i = 10:iterations, .combine = rbind,
+                  .options.snow = opts) %dopar%
+  {
+    # Get FRP for 2017, keep only major fires (values above 0.5)
+    frpx <- raster::rotate(FRP[[i]])
+    p <- raster::rasterToPoints(frpx, fun = function(x){x > 0.5})
+    spdf <- data.frame(p)
+    spdf$date <- dates2017[i]
+    names(spdf) <- c("long", "lat", "frp", "date")
+    sp::coordinates(spdf) <- ~long + lat
+    n_points <- dim(spdf@data)[1]
+
+    # Get HRES for 2017, where FRP is above 0.5
+    lead_day <- 0
+    hres_df <- data.frame(matrix(NA, ncol = 10, nrow = n_points))
+    for (j in i:(i - 9)){
+      lead_day <- lead_day + 1
+      hres <- raster::rotate(raster::brick(myfilelist[[j]])[[lead_day]])
+      x <- raster::extract(x = hres, y = spdf)
+      hres_df[, lead_day] <- x
+    }
+    names(hres_df) <- paste0("hres_day", 1:10)
+
+    # Get ERA5 to calculate various warning levels
+    # Low = 0.75, Moderate = 0.85, High = 0.90, Very high = 0.95, Extreme = 0.98
+    median <- caliver::daily_clima(r = ERA5, dates = dates2017[i], probs = 0.50)
+    moderate <- caliver::daily_clima(r = ERA5, dates = dates2017[i], probs = 0.85)
+    high <- caliver::daily_clima(r = ERA5, dates = dates2017[i], probs = 0.90)
+    very_high <- caliver::daily_clima(r = ERA5, dates = dates2017[i], probs = 0.95)
+    CLIM <- raster::extract(x = median, y = spdf)
+    thr85 <- raster::extract(x = high, y = spdf)
+    thr90 <- raster::extract(x = high, y = spdf)
+    thr95 <- raster::extract(x = very_high, y = spdf)
+
+    # Append results to table
+    df <- cbind(spdf@coords, spdf@data, CLIM, thr85, thr90, thr95, hres_df)
+    df <- df[complete.cases(df), ]
+    return(df)
   }
+close(pb)
+stopCluster(cl)
+# saveRDS(result, "data/PODdataframe.rds")
 
+# Load, if pre-calculate
+# result <- readRDS("data/PODdataframe.rds")
+# BasisRegions <- readRDS("data/BasisRegions_simplified.rds")
+
+# FRP locations of interest
+sp::coordinates(result) <- ~long + lat
+crs(result) <- crs(BasisRegions)
+
+# Add ID, Region and Zone to the dataset vias spatial intersection
+fires <- spatialEco::point.in.poly(result, BasisRegions)
+fires <- as.data.frame(fires)
+fires <- fires[complete.cases(fires), ]
+# saveRDS(fires, "data/fires.rds")
+
+# Check if CLIM and HRES are above threshold (90th percentile)
+my_thr <- fires$thr90
+fires$CLIM <- fires$CLIM >= my_thr
+for (colx in which(names(fires) %in% paste0("hres_day", 1:10))){
+  x <- fires[, colx] > my_thr
+  fires <- cbind(fires, x)
 }
+names(fires)[which(names(fires) == "x")] <- paste0("HDay", 1:10)
+rm(x, colx)
+
+# Group by Region and calculate POD
+fires_binary <- fires %>%
+  mutate(FRP_binary = TRUE) %>%
+  select(Region, coords.x1, coords.x2, FRP_binary, CLIM,
+         HDay1, HDay2, HDay3, HDay4, HDay5,
+         HDay6, HDay7, HDay8, HDay9, HDay10) %>%
+  reshape2::melt(id.vars = c("Region", "coords.x1", "coords.x2", "FRP_binary")) %>%
+  group_by(Region, coords.x1, coords.x2, variable) %>%
+  summarise(POD = verify(obs = FRP_binary, pred = value,
+                         frcst.type = "binary", obs.type = "binary")$POD) %>%
+  group_by(Region, variable) %>%
+  summarise(PODmean = mean(POD))
+# saveRDS(fires_binary, "data/fires_binary_90.rds")
+
+# FIGURE 5 #####################################################################
+
+# fires <- readRDS("data/fires.rds")
+
+ggplot(data = map_data("world"), aes(x = long, y = lat)) +
+  geom_polygon(aes(group = group), fill=NA, colour = "grey65") +
+  coord_equal() +  theme_bw() + xlab("Longitude") + ylab("Latitude") +
+  geom_polygon(data = regionXPoly,
+               aes(x = long, y = lat, group = group, fill = factor(Region)),
+               alpha = 0.5) +
+  scale_fill_manual(name="GFED4 regions",
+                    values = c("darkgrey",
+                               RColorBrewer::brewer.pal(12,"Paired"),
+                               "lightgrey"),
+                    labels = BasisRegions$Region) +
+  geom_point(data = data.frame(fires), aes(x = coords.x1, y = coords.x2),
+             shape = 1, color = "gray20", size = 0.1)
+
+ggsave(filename = "images/Figure05.eps", plot = last_plot(),
+       width = 1.5*W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
+
+# FIGURE 6 #####################################################################
+
+# fires_binary <- readRDS("data/fires_binary_90.rds")
+fires_binary <- fires_binary[-which(fires_binary$variable == "CLIM"), ]
+
+ggplot(fires_binary, aes(variable, Region, fill = PODmean)) +
+  geom_tile() +
+  geom_text(aes(label = round(PODmean, 2))) +
+  scale_fill_gradient(name = "POD", low = "white", high = "brown") +
+  theme_bw() + xlab("") + ylab("")
+
+ggsave(filename = "images/Figure06.eps", plot = last_plot(),
+       width = W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
+
+# FIGURE 7 #####################################################################
+
+# Chile
+dates_chile <- seq.Date(from = as.Date("2017-01-01"),
+                        to = as.Date("2017-01-31"),
+                        by = "day")
+bbox_chile <- as(raster::extent(-74, -70, -37, -33), "SpatialPolygons")
+png("images/Figure07A_map.png")
+raster::plot(chile, col = "lightgray")
+raster::plot(bbox_chile, lwd = 2, border = "red", add = TRUE)
+dev.off()
+# Crop manually to mainland!
+
+# Portugal
+dates_pt <- seq.Date(from = as.Date("2017-06-01"),
+                     to = as.Date("2017-06-30"),
+                     by = "day")
+bbox_pt <- as(raster::extent(-8.5, -7.6, 39.6, 40.3), "SpatialPolygons")
+pt <- gUnaryUnion(pt, id = pt@data$NAME_0)
+png("images/Figure07B_map.png")
+raster::plot(pt, col = "lightgray")
+raster::plot(bbox_pt, lwd = 2, border = "red", add = TRUE)
+dev.off()
+# Crop manually to mainland!
+
+# California
+dates_cali <- seq.Date(from = as.Date("2017-09-21"),
+                       to = as.Date("2017-10-20"),
+                       by = "day")
+bbox_cali <- as(raster::extent(-123.4, -117.6, 33.7, 42), "SpatialPolygons")
+png("images/Figure07C_map.png")
+raster::plot(cali, col = "lightgray")
+raster::plot(bbox_cali, lwd = 2, border = "red", add = TRUE)
+dev.off()
+# Crop manually to mainland!
+
+obs_file <- "/scratch/rd/nen/perClaudia/CAMS/CAMS_2017-01-01_2017-12-31_frpfire.nc"
+clima_file <- "/scratch/rd/nen/perClaudia/era5/fwi_era5_1980_2016_90th_daily_clima.nc"
+
+# Chile
+df_chile <- caliver:::make_forecast_summary(input_dir = "/hugetmp/forecasts/fwi",
+                                            p = bbox_chile,
+                                            event_dates = dates_chile,
+                                            obs = obs_file,
+                                            clima = clima_file)
+saveRDS(df_chile, "data/df_chile.rds")
+# Portugal
+df_pt <- caliver:::make_forecast_summary(input_dir = "/hugetmp/forecasts/fwi",
+                                         p = bbox_pt,
+                                         event_dates = dates_pt,
+                                         obs = obs_file,
+                                         clima = clima_file)
+saveRDS(df_pt, "data/df_pt.rds")
+# California
+df_cali <- caliver:::make_forecast_summary(input_dir = "/hugetmp/forecasts/fwi",
+                                           p = bbox_cali,
+                                           event_dates = dates_cali,
+                                           obs = obs_file,
+                                           clima = clima_file)
+saveRDS(df_cali, "data/df_cali.rds")
+
+# 7A Chile
+# df_chile <- readRDS("data/df_chile.rds")
+caliver:::plot_forecast_summary(df_chile)
+ggsave(filename = "images/Figure07A_plot.eps", plot = last_plot(),
+       width = W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
+
+# 7B Portugal
+# df_pt <- readRDS("data/df_pt.rds")
+caliver:::plot_forecast_summary(df_pt)
+ggsave(filename = "images/Figure07B_plot.eps", plot = last_plot(),
+       width = W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
+
+# 7C California
+# df_cali <- readRDS("data/df_cali.rds")
+caliver:::plot_forecast_summary(df_cali)
+ggsave(filename = "images/Figure07C_plot.eps", plot = last_plot(),
+       width = W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
+
+# Combine map and plot using GIMP!
+
+# APPENDIX A ###################################################################
+
+dummy <- rotate(raster(paste0("/hugetmp/reanalysis/GEFF-ERA5/hres/fwi/ECMWF_FWI_20170101_1200_hr_fwi.nc")))
+# dummy <- rotate(raster(paste0("~/ECMWF_FWI_20170101_1200_hr_fwi.nc")))
+
+BasisRegions <- readRDS("data/BasisRegions_simplified.rds")
+BasisRegions <- rasterize(x = BasisRegions, y = dummy)
+BasisRegions <- raster::shift(raster::rotate(raster::shift(BasisRegions, 180)), 180)
+
+dummy <- raster(paste0("/hugetmp/reanalysis/GEFF-ERA5/hres/fwi/ECMWF_FWI_20170101_1200_hr_fwi.nc"))
+# dummy <- raster(paste0("~/ECMWF_FWI_20170101_1200_hr_fwi.nc"))
+pts <- xyFromCell(object = dummy, cell = which(!is.na(dummy[])), )
+pts <- SpatialPoints(coords = pts, proj4string = crs(dummy))
 
 # Remove NAs
-df_used <- df_used[complete.cases(df_used),]
-saveRDS(df_used, "data/SYNOPtable.rds")
-
-df_used <- readRDS("/hugetmp/publications/FireForecasting/data/SYNOPtable.rds")
-
-d <- df_used %>%
-  select(fwiobs, fwimod_re, fwimod_d2, fwimod_d6, fwimod_d10) %>%
-  reshape2::melt(id.vars = "fwiobs") %>%
-  filter(fwiobs < 250) %>%
-  filter(value < 250) %>%
-  filter(complete.cases(.)) %>%
-  mutate(bias = fwiobs - value,
-         mae = abs(fwiobs - value))
-
-ggplot(d, aes(x = variable, y = bias, fill = variable)) +
-  geom_boxplot(color="black", size=0.2) + # outlier.shape = NA
-  theme_bw() + #ylim(-6, 4) +
-  xlab("") + ylab("Bias") +
-  scale_fill_discrete_qualitative() +
-  theme(legend.position = "none") +
-  scale_x_discrete(labels = c("ERA5", "HRES_D2", "HRES_D6", "HRES_D10")) +
-  coord_flip()
-
-ggplot(d, aes(x = variable, y = mae, fill = variable)) +
-  geom_boxplot(color="black", size=0.2) + #, outlier.shape = NA
-  theme_bw() + #ylim(0, 15) +
-  xlab("") + ylab("Mean Absolute Error") +
-  scale_fill_discrete_qualitative() +
-  theme(legend.position = "none") +
-  scale_x_discrete(labels = c("ERA5", "HRES_D2", "HRES_D6", "HRES_D10")) +
-  coord_flip()
-
-rm(list = ls())
-
-################################################################################
-## POD by GFED4 regions ########################################################
-################################################################################
-
-# Get forecasts for day 2-6-10
-day2FWI <- raster::brick("data/day2FWI.nc")
-day6FWI <- raster::brick("data/day6FWI.nc")
-day10FWI <- raster::brick("data/day10FWI.nc")
-
-# Read in Fire Radiative Power (frp) and resample
-frp <- raster::brick("/hugetmp/CAMS/CAMS_2017-01-01_2017-12-31_frpfire_rotated.nc")
-frpR <- raster::resample(x = frp, y = day2FWI[[1]], progress = "text")
-
-# Load clima, if not already in memory
-# dclima <- brick("/scratch/rd/nen/perClaudia/era5/fwi_clima.nc")
-# Resample clima
-dclimaR <- resample(x = dclima, y = day2FWI[[1]], progress = "text")
-
-POD2 <- POD6 <- POD10 <- climafire <- c()
-for (i in 1:14){
-
-  print(dfgfed4$Region[i])
-
-  areaOfInterest <- BasisRegions[i,]
-  my_threshold <- as.numeric(df$`Very high`[df$RegionCountry == dfgfed4$Region[i]])
-
-  frpM <- caliver::mask_crop_subset(r = frpR, p = areaOfInterest)
-  #day2FWIM <- mask_crop_subset(r = day2FWI, p = areaOfInterest)
-  #day6FWIM <- mask_crop_subset(r = day6FWI, p = areaOfInterest)
-  day10FWIM <- mask_crop_subset(r = day10FWI, p = areaOfInterest)
-  clima_temp <- mask_crop_subset(r = dclima, p = areaOfInterest)
-
-  frp_vector <- as.vector(frpM[])
-  #day2_vector <- as.vector(day2FWIM[])
-  #day6_vector <- as.vector(day6FWIM[])
-  day10_vector <- as.vector(day10FWIM[])
-  clima_vector <- as.vector(clima_temp[])
-  idx <- which(frp_vector >= 0.5)
-
-  # Take only cells where there has been a large fire
-  frp_vector <- frp_vector[idx]
-  #day2_vector <- day2_vector[idx]
-  #day6_vector <- day6_vector[idx]
-  day10_vector <- day10_vector[idx]
-  clima_vector <- clima_vector[idx]
-
-  frp_vector <- frp_vector >= 0.5
-  #day2_vector <- day2_vector >= my_threshold
-  #day6_vector <- day6_vector >= my_threshold
-  day10_vector <- day10_vector >= my_threshold
-  clima_vector <- clima_vector >= my_threshold
-
-  #POD2 <- c(POD2, verify(obs = frp_vector, pred = day2_vector, frcst.type = "binary", obs.type = "binary")$POD)
-
-  #POD6 <- c(POD6, verify(obs = frp_vector, pred = day6_vector, frcst.type = "binary", obs.type = "binary")$POD)
-
-  POD10 <- c(POD10, verify(obs = frp_vector, pred = day10_vector, frcst.type = "binary", obs.type = "binary")$POD)
-
-  climafire <- c(climafire, verify(obs = frp_vector, pred = clima_vector,
-                                   frcst.type = "binary", obs.type = "binary")$POD)
-
-  #rm(areaOfInterest, my_threshold, frpM, day2FWIM, day6FWIM, frp_vector, day2_vector, day6_vector, idx)
-  #saveRDS(POD2, "POD2.rds")
-  #saveRDS(POD6, "POD6.rds")
-  saveRDS(POD10, "POD10.rds")
-  saveRDS(climafire, "climafire.rds")
-  gc()
-  removeTmpFiles() # remove temp files
-}
-# POD2 <- readRDS("POD2.rds")
-# POD6 <- readRDS("POD6.rds")
-# POD10 <- readRDS("POD10.rds")
-# climafire <- readRDS("climafire.rds")
-
-regions.pod <- BasisRegions %>% broom::tidy(region = "ID") # to fix!
-# add attributes
-regions.pod$POD2 <- regions.pod$POD6 <- regions.pod$POD10 <- regions.pod$clima <- NA
-for (i in 1:14){
-  regions.pod$POD2[regions.pod$id == as.character(i)] <- round(POD2[i], 1)
-  regions.pod$POD6[regions.pod$id == as.character(i)] <- round(POD6[i], 1)
-  regions.pod$POD10[regions.pod$id == as.character(i)] <- round(POD10[i], 1)
-  regions.pod$clima[regions.pod$id == as.character(i)] <- round(climafire[i], 1)
-}
-regions.pod$POD2 <- factor(regions.pod$POD2,
-                           levels = seq(from = 0.0, to = 1.0, by = 0.1),
-                           labels = seq(from = 0.0, to = 1.0, by = 0.1))
-regions.pod$POD6 <- factor(regions.pod$POD6,
-                           levels = seq(from = 0.0, to = 1.0, by = 0.1),
-                           labels = seq(from = 0.0, to = 1.0, by = 0.1))
-regions.pod$POD10 <- factor(regions.pod$POD10,
-                            levels = seq(from = 0.0, to = 1.0, by = 0.1),
-                            labels = seq(from = 0.0, to = 1.0, by = 0.1))
-regions.pod$clima <- factor(regions.pod$clima,
-                            levels = seq(from = 0.0, to = 1.0, by = 0.1),
-                            labels = seq(from = 0.0, to = 1.0, by = 0.1))
-
-ggplot(aes(x = long, y = lat), data = map_data("world")) +
-  geom_polygon(aes(group = group), fill=NA, colour = "grey65") +
-  coord_equal() +  theme_bw() + xlab("Longitude") + ylab("Latitude") +
-  geom_polygon(data = regions.pod,
-               aes(x = long, y = lat, group = group, fill = as.factor(POD2)),
-               alpha = 0.6) +
-  scale_fill_manual(name="POD2",
-                    values = c("#FFF7EC", "#FFF7EC", brewer.pal(9, "OrRd")), drop = FALSE) +
-  theme(text = element_text(size=20))
-
-ggplot(aes(x = long, y = lat), data = map_data("world")) +
-  geom_polygon(aes(group = group), fill=NA, colour = "grey65") +
-  coord_equal() +  theme_bw() + xlab("Longitude") + ylab("Latitude") +
-  geom_polygon(data = regions.pod,
-               aes(x = long, y = lat, group = group, fill = POD6),
-               alpha = 0.6) +
-  scale_fill_manual(name="POD6",
-                    values = c("#FFF7EC", "#FFF7EC", brewer.pal(9, "OrRd")), drop = FALSE) +
-  theme(text = element_text(size=20))
-
-ggplot(aes(x = long, y = lat), data = map_data("world")) +
-  geom_polygon(aes(group = group), fill=NA, colour = "grey65") +
-  coord_equal() +  theme_bw() + xlab("Longitude") + ylab("Latitude") +
-  geom_polygon(data = regions.pod,
-               aes(x = long, y = lat, group = group, fill = POD10),
-               alpha = 0.6) +
-  scale_fill_manual(name="POD10",
-                    values = c("#FFF7EC", "#FFF7EC", brewer.pal(9, "OrRd")), drop = FALSE) +
-  theme(text = element_text(size=20))
-
-ggplot(aes(x = long, y = lat), data = map_data("world")) +
-  geom_polygon(aes(group = group), fill=NA, colour = "grey65") +
-  coord_equal() +  theme_bw() + xlab("Longitude") + ylab("Latitude") +
-  geom_polygon(data = regions.pod,
-               aes(x = long, y = lat, group = group, fill = clima),
-               alpha = 0.6) +
-  scale_fill_manual(name="Climatology",
-                    values = c("#FFF7EC", "#FFF7EC", brewer.pal(9, "OrRd")), drop = FALSE) +
-  theme(text = element_text(size=20))
-
-## Verify fire danger classes
-
-The following four events were selected to verify the previously calculated danger classes:
-
-  * Spain	2016-08-28	2016-09-11
-* Chile	2017-01-15	2017-01-29
-
-In order to find the actual area affected by fires (for each of the above events), we follow the steps below:
-
-  1. Get Fire Radiative Power from CAMS observations using the bash script [CAMS_GFAS_Observations.sh](https://software.ecmwf.int/stash/projects/CEMSF/repos/fire_utilities/browse/sh/CAMS_GFAS_Observations.sh):
-  `sh CAMS_Observations.sh`. This generates the file: CAMS_**TimeWindow**_frpfire_rotated.nc
-2. Load the file above as RasterBrick
-3. Sum all the FRP over time
-4. If there are many small fires, we can set a threshold of minimum radiative power to be considered. Convert layer info to binary: 1 if FRP > 0.5, 0 otherwise
-5. Plot to check maximum extension
-6. Remove zeros and create a bounding box (fireBBOX) including only cells = 1
-
-Once the affected area has been identified, we use this to verify the forecast with the observed fire radiative power.
-
-Forecast data is obtained by using the bash scripts: [GEFF_Forecast.sh](https://software.ecmwf.int/stash/projects/CEMSF/repos/fire_utilities/browse/sh/GEFF_Forecast.sh): `sh GEFF_Forecast.sh`. This generates one file per forecast day: **start_date**_**end_date**_ecfire_fwi_fwi.nc
-
-The code below shows how to perform the verification for the 4 events.
-
-#### Chile
-
-Numerous wildfire in Chile were reported in January 2017. In the table below we compare the danger levels at large scale and national level.
-
-{r, echo = FALSE}
-knitr::kable(df[c(7,8),], row.names = FALSE)
-
-
-
-# GADM administrative boundaries
-Chile     <- raster::getData(name = "GADM", country = "Chile", level = 0)
-
-# 2. Load the frp file as RasterBrick:
-start_date <- "2017-01-01"
-end_date <- "2017-01-31"
-x <- raster::brick(paste0("/hugetmp/fire/CAMS/CAMS_",
-                          start_date, "_", end_date, "_frpfire_rotated.nc"))
-
-# 3. Sum all the FRP over time
-xsum <- raster::calc(x, sum)
-
-# 4. Convert layer info to binary: 1 if FRP > 0.5, 0 otherwise
-thresholdFRP <- 0.5
-xsum[xsum > thresholdFRP] <- 1
-xsum[xsum <= thresholdFRP] <- 0 # extra step to plot pixels <= 0.5 as gray background
-allFires <- mask_crop_subset(r = xsum, p = Chile, mask = TRUE, crop = TRUE)
-raster::plot(allFires)
-
-# 5-6. Remove zeros and create a bounding box including only cells = 1
-xsum[xsum == 0] <- NA
-fireBBOX <- as(raster::extent(raster::trim(mask_crop_subset(r = xsum,
-                                                            p = Chile,
-                                                            mask = TRUE,
-                                                            crop = TRUE))),
-               "SpatialPolygons")
-raster::plot(fireBBOX, border = "red", add = TRUE)
-
-fireBBOX_CL <- as(raster::extent(-74, -70, -37, -33), "SpatialPolygons")
-# raster::plot(Chile, col = "lightgray")
-# raster::plot(fireBBOX_CL, lwd = 2, border = "red", add = TRUE)
-
-In the figure above Chile is shaded in gray while the areas in green show the most important fire activities(fireBBOX), which we compare below with the high danger level calculated previously for Chile.
-
-
-ChileFRP <- plot_obs_vs_forecast(input_dir = "../geff/forecast/fwi2017/ffwi_rotated",
-                                 p = fireBBOX_CL,
-                                 threshold = as.numeric(df$`Very high`[df$Location == "Chile"]),
-                                 start_date = start_date,
-                                 end_date = end_date,
-                                 obs_file_path = paste0("/hugetmp/fire/CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"),
-                                 forecast_type = "hr",
-                                 origin = "cfwis",
-                                 index = "ffwi")
-ChileFRP
-
-ggsave(file = "/scratch/mo/moc0/fire/ChileFRP.png",
-       plot = ChileFRP, width=unit(1050, "px"), height=unit(750, "px"))
-
-
-#### Portugal
-
-Numerous wildfire in Portugal were reported in January 2017. In the table below we compare the danger levels at large scale and national level.
-
-{r, echo = FALSE}
-knitr::kable(df[c(15:17),], row.names = FALSE)
-
-
-
-# GADM administrative boundary
-Portugal     <- raster::getData(name = "GADM", country = "Portugal", level = 0)
-
-# 2. Load the frp file as RasterBrick:
-start_date <- "2017-06-01"
-end_date <- "2017-06-30"
-x <- raster::brick(paste0("/hugetmp/fire/CAMS/CAMS_",
-                          start_date, "_", end_date, "_frpfire_rotated.nc"))
-
-# 3. Sum all the FRP over time
-xsum <- raster::calc(x, sum)
-
-# 4. Convert layer info to binary: 1 if FRP > 0.5, 0 otherwise
-thresholdFRP <- 0.5
-xsum[xsum > thresholdFRP] <- 1
-xsum[xsum <= thresholdFRP] <- 0 # extra step to plot pixels <= 0.5 as gray background
-allFires <- mask_crop_subset(r = xsum, p = Portugal, mask = TRUE, crop = TRUE)
-raster::plot(allFires)
-
-# 5-6. Remove zeros and create a bounding box including only cells = 1
-xsum[xsum == 0] <- NA
-fireBBOX <- as(raster::extent(raster::trim(mask_crop_subset(r = xsum,
-                                                            p = Portugal,
-                                                            mask = TRUE,
-                                                            crop = TRUE))),
-               "SpatialPolygons")
-raster::plot(fireBBOX, border = "red", add = TRUE)
-
-fireBBOX_CL <- as(raster::extent(-8.5, -7.6, 39.6, 40.3), "SpatialPolygons")
-# raster::plot(Portugal, col = "lightgray")
-# raster::plot(fireBBOX_CL, lwd = 2, border = "red", add = TRUE)
-
-
-<img src="figures/Portugal_boxy_map.png" width="700" />
-
-  In the figure above Portugal is shaded in gray while the areas in green show the most important fire activities(fireBBOX), which we compare below with the high danger level calculated previously for Portugal.
-
-
-PortugalFRP <- plot_obs_vs_forecast(input_dir = "../geff/forecast/fwi2017/ffwi_rotated",
-                                    p = fireBBOX_CL,
-                                    threshold = as.numeric(df$`Very high`[df$Location == "Portugal"]),
-                                    start_date = start_date,
-                                    end_date = end_date,
-                                    obs_file_path = paste0("/hugetmp/fire/CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"), forecast_type = "hr", origin = "cfwis", index = "ffwi")
-PortugalFRP
-
-
-{r, echo = FALSE}
-# For publication
-ggsave(file = "/scratch/mo/moc0/fire/PortugalFRP.eps",
-       plot = PortugalFRP, width=unit(10, "in"), height=unit(8, "in"))
-# For HTML vignette
-ggsave(file = "/scratch/mo/moc0/fire/PortugalFRP.png",
-       plot = PortugalFRP, width=unit(10, "in"), height=unit(8, "in"))
-
-
-#### California
-
-Numerous wildfire in California were reported in January 2017. In the table below we compare the danger levels at large scale and national level.
-
-{r, echo = FALSE}
-knitr::kable(df[c(15:17),], row.names = FALSE)
-
-
-
-# GADM administrative boundaries
-California    <- raster::getData(name = "GADM", country = "USA", level = 1)[6,]
-
-# 2. Load the frp file as RasterBrick:
-start_date <- "2017-09-21"
-end_date <- "2017-10-20"
-x <- raster::brick(paste0("/hugetmp/fire/CAMS/CAMS_",
-                          start_date, "_", end_date, "_frpfire_rotated.nc"))
-
-# 3. Sum all the FRP over time
-xsum <- raster::calc(x, sum)
-
-# 4. Convert layer info to binary: 1 if FRP > 0.5, 0 otherwise
-thresholdFRP <- 0.5
-xsum[xsum > thresholdFRP] <- 1
-xsum[xsum <= thresholdFRP] <- 0 # extra step to plot pixels <= 0.5 as gray background
-allFires <- mask_crop_subset(r = xsum, p = California, mask = TRUE, crop = TRUE)
-raster::plot(allFires)
-
-# 5-6. Remove zeros and create a bounding box including only cells = 1
-xsum[xsum == 0] <- NA
-fireBBOX <- as(raster::extent(raster::trim(mask_crop_subset(r = xsum,
-                                                            p = California,
-                                                            mask = TRUE,
-                                                            crop = TRUE))),
-               "SpatialPolygons")
-raster::plot(fireBBOX, border = "red", add = TRUE)
-
-fireBBOX
-fireBBOX_CL <- as(raster::extent(-123.4, -117.6, 33.7, 42), "SpatialPolygons")
-# raster::plot(California, col = "lightgray")
-# raster::plot(fireBBOX_CL, lwd = 2, border = "red", add = TRUE)
-
-
-<img src="figures/California_boxy_map.png" width="700" />
-
-  In the figure above California is shaded in gray while the areas in green show the most important fire activities(fireBBOX), which we compare below with the high danger level calculated previously for California.
-
-
-CaliforniaFRP <- plot_obs_vs_forecast(input_dir = "../geff/forecast/fwi2017/ffwi_rotated",
-                                      p = fireBBOX_CL,
-                                      threshold = as.numeric(df$`Very high`[df$Location == "California"]),
-                                      start_date = start_date,
-                                      end_date = end_date,
-                                      obs_file_path = paste0("/hugetmp/fire/CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"), forecast_type = "hr", origin = "cfwis", index = "ffwi")
-CaliforniaFRP
-
-
-{r, echo = FALSE}
-# For publication
-ggsave(file = "/scratch/mo/moc0/fire/CaliforniaFRP.eps",
-       plot = CaliforniaFRP, width=unit(10, "in"), height=unit(8, "in"))
-# For HTML vignette
-ggsave(file = "/scratch/mo/moc0/fire/CaliforniaFRP.png",
-       plot = CaliforniaFRP, width=unit(10, "in"), height=unit(8, "in"))
-
-
-## Scores
-# Let's take a large area, such as Canada. The advantage of using the above danger levels over the continuous values is that we have a better correspondance between hit rate and false alarms.
-# For the fire in Canada, the peak in radiative power was obtained on the 2015-06-16. To calculate the scores I need to collect the forecasts of the previous 10 days and compare fwi and frp.
-
-place <- "Chile"
-start_date <- "2017-01-01"
-end_date <- "2017-01-31"
-eventDay <- 26
-
-areaOfInterest <- as(raster::extent(-74, -70, -37, -33), "SpatialPolygons")
-
-mydays <- seq(from=as.Date(start_date), to=as.Date(end_date), by="days")[(eventDay-9):eventDay]
-
-df <- readRDS("thresholds_geff.rds")
-my_threshold <- as.numeric(df$`Very high`[df$Location == place])
-
-# Extract frp only once (for the event day)
-frpR <- raster::brick(paste0("../CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"))[[eventDay]]
-if (round(frpR@extent@xmin, 0) == 0) frpR <- raster::rotate(frpR)
-frpR <- mask_crop_subset(r = frpR, p = areaOfInterest, mask = TRUE, crop = FALSE)
-frp_v <- as.vector(frpR)
-frp_v[frp_v < 0.5] <- FALSE
-frp_v[frp_v >= 0.5] <- TRUE
-
-# Extract ENS + HRES and calculate POD distribution for given area
-y <- data.frame(matrix(NA, nrow = length(mydays), ncol = 52))
-for (i in seq_along(mydays)) {
-  newdate <- strptime(as.character(mydays[i]), "%Y-%m-%d")
-  newdate <- format(newdate, "%Y%m%d")
-  print(newdate)
-  myFiles <- list.files(path = "../geff/forecast/fwi2017/ffwi_rotated",
-                        pattern = newdate, full.names = TRUE)
-  for (j in seq_along(myFiles)){
-    print(paste("member", j))
-    singlefile <- myFiles[j]
-    fwiR <- raster::brick(singlefile)[[11-i]]
-    if (round(fwiR@extent@xmin, 0) == 0) fwiR <- raster::rotate(fwiR)
-    fwi <- mask_crop_subset(r = fwiR, p = areaOfInterest, mask = TRUE, crop = FALSE)
-    fwi <- raster::resample(fwi, frpR, progress = "text")
-    fwi_v <- as.vector(fwi)
-    fwi_v[fwi_v < my_threshold] <- FALSE
-    fwi_v[fwi_v >= my_threshold] <- TRUE
-    A <- verify(obs = frp_v, pred = fwi_v,
-                frcst.type = "binary", obs.type = "binary")
-    y[i, j] <- A$POD
-  }
-}
-y$Day <- 10:1
-ensDF <- reshape2::melt(y[,c(1:51, 53)], id=c("Day"))
-fcDF <- reshape2::melt(y[, c(52, 53)], id=c("Day"))
-saveRDS(ensDF, "Chile_ensDF.rds")
-saveRDS(fcDF, "Chile_hresDF.rds")
-
-ggplot() +
-  # box plot of cf + pf1-50
-  geom_boxplot(data = ensDF, aes(x = factor(Day), y= value)) +
-  # points of fc
-  geom_point(data = fcDF, aes(x=factor(Day), y=value, color = "HRES"), size = 5) +
-  theme(legend.title=element_blank()) +
-  xlab("Day") + ylab("POD") +
-  #ggtitle("POD of fire in Chile Jan 2017, danger > very high level") +
-  theme(plot.title = element_text(hjust = 0.5))
-
-
-
-place <- "Portugal"
-start_date <- "2017-06-01"
-end_date <- "2017-06-30"
-eventDay <- 18
-
-areaOfInterest <- as(raster::extent(-8.5, -7.6, 39.6, 40.3), "SpatialPolygons")
-
-mydays <- seq(from=as.Date(start_date), to=as.Date(end_date), by="days")[(eventDay-9):eventDay]
-
-df <- readRDS("thresholds_geff.rds")
-my_threshold <- as.numeric(df$`Very high`[df$Location == place])
-
-# Extract frp only once (for the event day)
-frpR <- raster::brick(paste0("../CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"))[[eventDay]]
-if (round(frpR@extent@xmin, 0) == 0) frpR <- raster::rotate(frpR)
-frpR <- mask_crop_subset(r = frpR, p = areaOfInterest, mask = TRUE, crop = FALSE)
-frp_v <- as.vector(frpR)
-frp_v[frp_v < 0.5] <- FALSE
-frp_v[frp_v >= 0.5] <- TRUE
-
-# Extract ENS + HRES and calculate POD distribution for given area
-y <- data.frame(matrix(NA, nrow = length(mydays), ncol = 52))
-for (i in seq_along(mydays)) {
-  newdate <- strptime(as.character(mydays[i]), "%Y-%m-%d")
-  newdate <- format(newdate, "%Y%m%d")
-  print(newdate)
-  myFiles <- list.files(path = "../geff/forecast/fwi2017/ffwi_rotated",
-                        pattern = newdate, full.names = TRUE)
-  for (j in seq_along(myFiles)){
-    print(paste("member", j))
-    singlefile <- myFiles[j]
-    fwiR <- raster::brick(singlefile)[[11-i]]
-    if (round(fwiR@extent@xmin, 0) == 0) fwiR <- raster::rotate(fwiR)
-    fwi <- mask_crop_subset(r = fwiR, p = areaOfInterest, mask = TRUE, crop = FALSE)
-    fwi <- raster::resample(fwi, frpR, progress = "text")
-    fwi_v <- as.vector(fwi)
-    fwi_v[fwi_v < my_threshold] <- FALSE
-    fwi_v[fwi_v >= my_threshold] <- TRUE
-    A <- verify(obs = frp_v, pred = fwi_v,
-                frcst.type = "binary", obs.type = "binary")
-    y[i, j] <- A$POD
-  }
-}
-y$Day <- 10:1
-ensDF <- reshape2::melt(y[,c(1:51, 53)], id=c("Day"))
-fcDF <- reshape2::melt(y[, c(52, 53)], id=c("Day"))
-saveRDS(ensDF, "Portugal_ensDF.rds")
-saveRDS(fcDF, "Portugal_hresDF.rds")
-
-ggplot() +
-  # box plot of cf + pf1-50
-  geom_boxplot(data = ensDF, aes(x = factor(Day), y= value)) +
-  # points of fc
-  geom_point(data = fcDF, aes(x=factor(Day), y=value, color = "HRES"), size = 5) +
-  theme(legend.title=element_blank()) +
-  xlab("Day") + ylab("POD") +
-  theme(plot.title = element_text(hjust = 0.5))
-
-place <- "California"
-start_date <- "2017-09-21"
-end_date <- "2017-10-20"
-eventDay <- 19
-
-areaOfInterest <- as(raster::extent(-123.4, -117.6, 33.7, 42), "SpatialPolygons")
-
-mydays <- seq(from=as.Date(start_date), to=as.Date(end_date), by="days")[(eventDay-9):eventDay]
-
-df <- readRDS("thresholds_geff.rds")
-my_threshold <- as.numeric(df$`Very high`[df$Location == place])
-
-# Extract frp only once (for the event day)
-frpR <- raster::brick(paste0("../CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"))[[eventDay]]
-if (round(frpR@extent@xmin, 0) == 0) frpR <- raster::rotate(frpR)
-frpR <- mask_crop_subset(r = frpR, p = areaOfInterest, mask = TRUE, crop = FALSE)
-frp_v <- as.vector(frpR)
-frp_v[frp_v < 0.5] <- FALSE
-frp_v[frp_v >= 0.5] <- TRUE
-
-# Extract ENS + HRES and calculate POD distribution for given area
-y <- data.frame(matrix(NA, nrow = length(mydays), ncol = 52))
-for (i in seq_along(mydays)) {
-  newdate <- strptime(as.character(mydays[i]), "%Y-%m-%d")
-  newdate <- format(newdate, "%Y%m%d")
-  print(newdate)
-  myFiles <- list.files(path = "../geff/forecast/fwi2017/ffwi_rotated",
-                        pattern = newdate, full.names = TRUE)
-  for (j in seq_along(myFiles)){
-    print(paste("member", j))
-    singlefile <- myFiles[j]
-    fwiR <- raster::brick(singlefile)[[11-i]]
-    if (round(fwiR@extent@xmin, 0) == 0) fwiR <- raster::rotate(fwiR)
-    fwi <- mask_crop_subset(r = fwiR, p = areaOfInterest, mask = TRUE, crop = FALSE)
-    fwi <- raster::resample(fwi, frpR, progress = "text")
-    fwi_v <- as.vector(fwi)
-    fwi_v[fwi_v < my_threshold] <- FALSE
-    fwi_v[fwi_v >= my_threshold] <- TRUE
-    A <- verify(obs = frp_v, pred = fwi_v,
-                frcst.type = "binary", obs.type = "binary")
-    y[i, j] <- A$POD
-  }
-}
-y$Day <- 10:1
-ensDF <- reshape2::melt(y[,c(1:51, 53)], id=c("Day"))
-fcDF <- reshape2::melt(y[, c(52, 53)], id=c("Day"))
-saveRDS(ensDF, "California_ensDF.rds")
-saveRDS(fcDF, "California_hresDF.rds")
-
-ggplot() +
-  # box plot of cf + pf1-50
-  geom_boxplot(data = ensDF, aes(x = factor(Day), y= value)) +
-  # points of fc
-  geom_point(data = fcDF,
-             aes(x=factor(Day), y=value, color = "HRES"), size = 5) +
-  theme(legend.title=element_blank()) +
-  xlab("Day") + ylab("POD") +
-  theme(plot.title = element_text(hjust = 0.5))
-
-
-## FWI and ENS
-# Let's take a large area, such as Canada. The advantage of using the above danger levels over the continuous values is that we have a better correspondance between hit rate and false alarms.
-# For the fire in Canada, the peak in radiative power was obtained on the 2015-06-16. To calculate the scores I need to collect the forecasts of the previous 10 days and compare fwi and frp.
-
-place <- "Chile"
-start_date <- "2017-01-01"
-end_date <- "2017-01-31"
-eventDay <- 26
-
-areaOfInterest <- as(raster::extent(-74, -70, -37, -33), "SpatialPolygons")
-
-mydays <- seq(from=as.Date(start_date), to=as.Date(end_date), by="days")[(eventDay-9):eventDay]
-
-df <- readRDS("thresholds_geff.rds")
-
-# Extract frp only once (for the event day)
-frpR <- raster::brick(paste0("../CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"))[[eventDay]]
-
-eventLocation <- SpatialPoints(coords = data.frame(lon = -72.35, lat = -35.55),
-                               proj4string = crs(frpR))
-plot(crop(frpR , areaOfInterest))
-plot(eventLocation, col = "red", add =TRUE)
-extract(x = frpR, y = eventLocation)
-
-# Extract ENS + HRES and calculate POD distribution for given area
-y <- data.frame(matrix(NA, nrow = length(mydays), ncol = 52))
-for (i in seq_along(mydays)) {
-  newdate <- strptime(as.character(mydays[i]), "%Y-%m-%d")
-  newdate <- format(newdate, "%Y%m%d")
-  print(newdate)
-  myFiles <- list.files(path = "../geff/forecast/fwi2017/ffwi_rotated",
-                        pattern = newdate, full.names = TRUE)
-  for (j in seq_along(myFiles)){
-    print(paste("member", j))
-    singlefile <- myFiles[j]
-    fwiR <- raster::brick(singlefile)[[11-i]]
-    if (round(fwiR@extent@xmin, 0) == 0) fwiR <- raster::rotate(fwiR)
-    y[i, j] <- extract(x = fwiR, y = eventLocation)
-  }
-}
-y$Day <- 10:1
-ensDF <- reshape2::melt(y[,c(1:51, 53)], id=c("Day"))
-fcDF <- reshape2::melt(y[, c(52, 53)], id=c("Day"))
-saveRDS(ensDF, "Chile_ensDFfwi.rds")
-saveRDS(fcDF, "Chile_hresDFfwi.rds")
-
-dfFWI <- data.frame(fwi1=c(0, as.numeric(df[df$Location == place, 2:6])),
-                    fwi2=c(as.numeric(df[df$Location == place, 2:6]), 100),
-                    Danger = c("Very low", names(df)[2:6]))
-
-dfFWI$Danger <- factor(dfFWI$Danger, levels = rev(c("Very low", "Low", "Moderate", "High", "Very high", "Extreme")))
-
-# ENSfwi
-ggplot() +
-  geom_rect(data = dfFWI, mapping = aes(ymin = fwi1, ymax = fwi2, xmin = 0, xmax = 11, fill = Danger), alpha = 0.3) +
-  # box plot of cf + pf1-50
-  geom_boxplot(data = ensDF, aes(x = Day, y= value, group = Day)) +
-  # points of fc
-  geom_point(data = fcDF, aes(x = Day, y= value, group = Day), size = 3, color = "coral") +
-
-  #theme(legend.title=element_blank()) +
-  xlab("Day") + ylab("FWI") +
-  theme(plot.title = element_text(hjust = 0.5)) +
-  scale_x_continuous(limits = c(0, 11), expand = c(0, 0), breaks = round(seq(1, 10, by = 1), 0)) +
-  scale_y_continuous(limits = c(0, 100), expand = c(0, 0))
-
-
-
-place <- "Portugal"
-start_date <- "2017-06-01"
-end_date <- "2017-06-30"
-eventDay <- 18
-
-areaOfInterest <- as(raster::extent(-8.5, -7.6, 39.6, 40.3), "SpatialPolygons")
-
-mydays <- seq(from=as.Date(start_date), to=as.Date(end_date), by="days")[(eventDay-9):eventDay]
-
-df <- readRDS("thresholds_geff.rds")
-
-# Extract frp only once (for the event day)
-frpR <- raster::brick(paste0("../CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"))[[eventDay]]
-
-eventLocation <- SpatialPoints(coords = data.frame(lon = -8.25, lat = 39.85),
-                               proj4string = crs(frpR))
-plot(crop(frpR , areaOfInterest))
-plot(eventLocation, col = "red", add =TRUE)
-extract(x = frpR, y = eventLocation)
-
-# Extract ENS + HRES and calculate POD distribution for given area
-y <- data.frame(matrix(NA, nrow = length(mydays), ncol = 52))
-for (i in seq_along(mydays)) {
-  newdate <- strptime(as.character(mydays[i]), "%Y-%m-%d")
-  newdate <- format(newdate, "%Y%m%d")
-  print(newdate)
-  myFiles <- list.files(path = "../geff/forecast/fwi2017/ffwi_rotated",
-                        pattern = newdate, full.names = TRUE)
-  for (j in seq_along(myFiles)){
-    print(paste("member", j))
-    singlefile <- myFiles[j]
-    fwiR <- raster::brick(singlefile)[[11-i]]
-    if (round(fwiR@extent@xmin, 0) == 0) fwiR <- raster::rotate(fwiR)
-    y[i, j] <- extract(x = fwiR, y = eventLocation)
-  }
-}
-y$Day <- 10:1
-ensDF <- reshape2::melt(y[,c(1:51, 53)], id=c("Day"))
-fcDF <- reshape2::melt(y[, c(52, 53)], id=c("Day"))
-saveRDS(ensDF, "Portugal_ensDFfwi.rds")
-saveRDS(fcDF, "Portugal_hresDFfwi.rds")
-
-dfFWI <- data.frame(fwi1=c(0, as.numeric(df[df$Location == place, 2:6])),
-                    fwi2=c(as.numeric(df[df$Location == place, 2:6]), 100),
-                    Danger = c("Very low", names(df)[2:6]))
-
-dfFWI$Danger <- factor(dfFWI$Danger, levels = rev(c("Very low", "Low", "Moderate", "High", "Very high", "Extreme")))
-
-# ENSfwi
-ggplot() +
-  geom_rect(data = dfFWI, mapping = aes(ymin = fwi1, ymax = fwi2, xmin = 0, xmax = 11, fill = Danger), alpha = 0.3) +
-  # box plot of cf + pf1-50
-  geom_boxplot(data = ensDF, aes(x = Day, y= value, group = Day)) +
-  # points of fc
-  geom_point(data = fcDF, aes(x = Day, y= value, group = Day), size = 3, color = "coral") +
-
-  #theme(legend.title=element_blank()) +
-  xlab("Day") + ylab("FWI") +
-  theme(plot.title = element_text(hjust = 0.5)) +
-  scale_x_continuous(limits = c(0, 11), expand = c(0, 0), breaks = round(seq(1, 10, by = 1), 0)) +
-  scale_y_continuous(limits = c(0, 100), expand = c(0, 0))
-
-
-
-place <- "California"
-start_date <- "2017-09-21"
-end_date <- "2017-10-20"
-eventDay <- 19
-
-areaOfInterest <- as(raster::extent(-123.4, -117.6, 33.7, 42), "SpatialPolygons")
-
-mydays <- seq(from=as.Date(start_date), to=as.Date(end_date), by="days")[(eventDay-9):eventDay]
-
-df <- readRDS("thresholds_geff.rds")
-
-# Extract frp only once (for the event day)
-frpR <- raster::brick(paste0("../CAMS/CAMS_", start_date, "_", end_date, "_frpfire_rotated.nc"))[[eventDay]]
-
-eventLocation <- SpatialPoints(coords = data.frame(lon = -122.65, lat = 38.55),
-                               proj4string = crs(frpR))
-plot(crop(frpR , areaOfInterest))
-plot(eventLocation, col = "red", add =TRUE)
-extract(x = frpR, y = eventLocation)
-
-# Extract ENS + HRES and calculate POD distribution for given area
-y <- data.frame(matrix(NA, nrow = length(mydays), ncol = 52))
-for (i in seq_along(mydays)) {
-  newdate <- strptime(as.character(mydays[i]), "%Y-%m-%d")
-  newdate <- format(newdate, "%Y%m%d")
-  print(newdate)
-  myFiles <- list.files(path = "../geff/forecast/fwi2017/ffwi_rotated",
-                        pattern = newdate, full.names = TRUE)
-  for (j in seq_along(myFiles)){
-    print(paste("member", j))
-    singlefile <- myFiles[j]
-    fwiR <- raster::brick(singlefile)[[11-i]]
-    if (round(fwiR@extent@xmin, 0) == 0) fwiR <- raster::rotate(fwiR)
-    y[i, j] <- extract(x = fwiR, y = eventLocation)
-  }
-}
-y$Day <- 10:1
-ensDF <- reshape2::melt(y[,c(1:51, 53)], id=c("Day"))
-fcDF <- reshape2::melt(y[, c(52, 53)], id=c("Day"))
-saveRDS(ensDF, "California_ensDFfwi.rds")
-saveRDS(fcDF, "California_hresDFfwi.rds")
-
-dfFWI <- data.frame(fwi1=c(0, as.numeric(df[df$Location == place, 2:6])),
-                    fwi2=c(as.numeric(df[df$Location == place, 2:6]), 100),
-                    Danger = c("Very low", names(df)[2:6]))
-
-dfFWI$Danger <- factor(dfFWI$Danger, levels = rev(c("Very low", "Low", "Moderate", "High", "Very high", "Extreme")))
-
-# ENSfwi
-ggplot() +
-  geom_rect(data = dfFWI, mapping = aes(ymin = fwi1, ymax = fwi2,
-                                        xmin = 0, xmax = 11,
-                                        fill = Danger), alpha = 0.3) +
-  # box plot of cf + pf1-50
-  geom_boxplot(data = ensDF, aes(x = Day, y= value, group = Day)) +
-  # points of fc
-  geom_point(data = fcDF, aes(x = Day, y= value, group = Day),
-             size = 3, color = "coral") +
-
-  #theme(legend.title=element_blank()) +
-  xlab("Day") + ylab("FWI") +
-  theme(plot.title = element_text(hjust = 0.5)) +
-  scale_x_continuous(limits = c(0, 11), expand = c(0, 0),
-                     breaks = round(seq(1, 10, by = 1), 0)) +
-  scale_y_continuous(limits = c(0, 100), expand = c(0, 0))
-
-
-
-
-
-# MAP LENGTH OF FIRE SEASON BASED ON 5C THRESHOLD
-# /perm/rd/nen/claudia
-era <- brick("/perm/rd/nen/claudia/era_t2_an_daymax.nc")
-fire_length <- calc(era, caliver::get_fire_season_length)
-# Open a file
-png("fire_season_length.png", width = 1000)
-# 2. Create a plot
-plot(rotate(fire_length, main = "Fire season length"))
-maps::map("world", add = TRUE, col = "lightgrey")
-# Close the file
-dev.off()
-
-
-## SCORING RULES
-Extract reanalysis and forecasted values.
-
-
-# FWI reanalysis dataset, GEFF reanalysis based on ERA5
-# rasterTmpFile("/hugetmp/tmpdir/")
-BasisRegions <- readRDS("BasisRegions_simplified.rds")
-FWI <- brick("/scratch/rd/nen/perClaudia/era5/fwi.nc") # 50GB!
-rea <- FWI[[which(substr(FWI@z[[1]], 1, 4) == "2017")]] # only 2017
-rm(FWI)
-ens_test <- brick("/hugetmp/FireEventsDatabase/fwi2017/ffwi_rotated/cfwis_ffwi_20170101_1200_00.nc")[[1]]
-# Resample so that reanalysis and ens have same cells
-rea_res <- resample(rea, ens_test, progress = "text")
-writeRaster(rea_res, filename="netCDF.nc", format="CDF", overwrite=TRUE)
-year2017 <- seq.Date(from = as.Date("2017-01-01"), to = as.Date("2017-12-31"), by = "day")
-dfre <- array(NA, c(365, 1, 14))
-df02 <- df06 <- df10 <- array(NA, c(365, 51, 14))
-# seq_along(year2017) # corrupted: 108,42,: and i = 324-344
-for (i in seq_along(year2017)){
-  print(year2017[i])
-  # Find cells in reanalysis where FWI > 5
-  #rea_mask <- rea_res[[i]] > 5
-  for (k in 1:14){
-    # print(k)
-    # Find average FWI by region
-    rea_cropped <- caliver::mask_crop_subset(rea_res[[i]], BasisRegions[k, ])
-    dfre[i, 1, k] <- cellStats(x = rea_cropped, stat = mean)
-    for (j in 0:50){
-      ens_member <- stringr::str_pad(j, 2, pad = "0")
-      file_ens <- paste0("/hugetmp/FireEventsDatabase/fwi2017/ffwi_rotated/cfwis_ffwi_",
-                         gsub(pattern = "-", replacement = "", year2017[i]),
-                         "_1200_", ens_member, ".nc")
-      ens <- brick(file_ens)[[c(2, 6, 10)]]
-      ens_cropped <- try(caliver::mask_crop_subset(ens, BasisRegions[k, ]), silent = TRUE)
-      if (class(ens_cropped) != "try-error"){
-        df02[i, j + 1, k] <- cellStats(x = ens_cropped[[1]], stat = mean)
-        df06[i, j + 1, k] <- cellStats(x = ens_cropped[[2]], stat = mean)
-        df10[i, j + 1, k] <- cellStats(x = ens_cropped[[3]], stat = mean)
-      }
+pts$region <- extract(BasisRegions, pts)
+ptsx <- sp.na.omit(pts, margin = 1)
+
+# check overlap
+plot(dummy)
+plot(BasisRegions, add = TRUE)
+plot(ptsx, add = TRUE)
+
+rm(dummy, pts)
+
+issue_dates <- seq.Date(from = as.Date("2017-01-01"),
+                        to = as.Date("2017-12-31"),
+                        by = "day")
+
+arr <- array(data = NA, dim = c(length(issue_dates), 10, 14))
+
+for (i in seq_along(issue_dates)){
+  issue_date <- issue_dates[i]
+  print(issue_date)
+  issuedate <- gsub(pattern = "-", replacement = "", x = issue_date)
+  fc_file <- paste0("/hugetmp/forecasts/hres/2017/ECMWF_FWI_",
+                    issuedate, "_1200_hr_fwi.nc")
+  fc <- raster::brick(fc_file)
+  for (leadtime in 1:10){
+    lead_date <- gsub(pattern = "-", replacement = "",
+                      x = issue_date + leadtime - 1)
+    re_file <- paste0("/hugetmp/reanalysis/GEFF-ERA5/hres/fwi/ECMWF_FWI_",
+                      lead_date, "_1200_hr_fwi.nc")
+    re <- raster::raster(re_file)
+    df_re <- extract(x = re, y = ptsx, df = TRUE)
+    df_fc <- extract(x = fc[[leadtime]], y = ptsx, df = TRUE)
+    bias <- df_fc[[2]] - df_re[[2]]
+    for (region in 1:14){
+      arr[i, leadtime, region] <- mean(bias[which(ptsx$region == region)],
+                                       na.rm = TRUE)
     }
   }
-  saveRDS(dfre, "dfre.rds")
-  saveRDS(df02, "df02.rds")
-  saveRDS(df06, "df06.rds")
-  saveRDS(df10, "df10.rds")
 }
+saveRDS(arr, "data/bias_array.rds")
 
-# Remove NAs - some files may be corrupted
-idx <- which(!is.na(dfre[, 1, 1]))
-dfre <- dfre[idx, , ]
-df02 <- df02[idx, , ]
-df06 <- df06[idx, , ]
-df10 <- df10[idx, , ]
-saveRDS(dfre, "dfre_noNAs.rds")
-saveRDS(df02, "df02_noNAs.rds")
-saveRDS(df06, "df06_noNAs.rds")
-saveRDS(df10, "df10_noNAs.rds")
-
-
-Use the above values for plotting.
-
-
-library(ggplot2)
-library(ggridges)
-
-dfre <- readRDS("dfre_noNAs.rds")
-df02 <- readRDS("df02_noNAs.rds")
-df06 <- readRDS("df06_noNAs.rds")
-df10 <- readRDS("df10_noNAs.rds")
-xdays <- dim(dfre)[1]
-for (region in 1:14){
-  tdf_re <- dfre[, region]
-  tdf_02 <- df02[, , region]
-  tdf_06 <- df06[, , region]
-  tdf_10 <- df10[, , region]
-  # Calculate Biases
-  tdf_02b <- as.data.frame(tdf_02 - tdf_re)
-  tdf_06b <- as.data.frame(tdf_06 - tdf_re)
-  tdf_10b <- as.data.frame(tdf_10 - tdf_re)
-  # Rbind and Melt
-  tdf_02b$Day <- 1:xdays; tdf_02b$Leadtime <- 2
-  tdf_06b$Day <- 1:xdays; tdf_06b$Leadtime <- 6
-  tdf_10b$Day <- 1:xdays; tdf_10b$Leadtime <- 10
-  tdf <- rbind(tdf_02b, tdf_06b, tdf_10b)
-  tdfm <- reshape2::melt(tdf, id=c("Day", "Leadtime"))
-  # grouped boxplot
-  ggplot(tdfm, aes(x=Day, y=value, group = Leadtime)) +
-    geom_boxplot()
-  cols <- rainbow(3, s = 0.5)
-  boxplot(value ~ Leadtime, data = tdfm, col = cols,
-          names = c("Day2", "Day6", "Day10"),
-          horizontal = TRUE)
-  # Calculate ensemble means
-  # tdf_02_mean <- apply(X = tdf_02, MARGIN = 1, FUN = mean)
-  # tdf_06_mean <- apply(X = tdf_06, MARGIN = 1, FUN = mean)
-  # tdf_10_mean <- apply(X = tdf_10, MARGIN = 1, FUN = mean)
-  # Melt data.frames
-  # tdf_rem <- data.frame(Day = 1:xdays, REA = tdf_re)
-  # tdf_rem <- do.call("rbind",
-  #                    replicate(51, tdf_rem, simplify = FALSE))
-  # tdf_rem <- cbind(tdf_rem, Member = rep(1:51, each = xdays))
-  # tdf_rem <- tdf_rem[, c(1, 3, 2)]
-  # tdfrem <- reshape2::melt(tdf_rem, id=c("Day", "Member"))
-  # tdfrem02 <- tdfrem; tdfrem02$variable <- "D02"
-  # tdfrem06 <- tdfrem; tdfrem06$variable <- "D06"
-  # tdfrem10 <- tdfrem; tdfrem10$variable <- "D10"
-  # tdfrem <- rbind(tdfrem02, tdfrem06, tdfrem10)
-  # tdf_02m <- reshape2::melt(tdf_02); names(tdf_02m) <- c("Day", "Member", "D02")
-  # tdf_06m <- reshape2::melt(tdf_06); names(tdf_06m) <- c("Day", "Member", "D06")
-  # tdf_10m <- reshape2::melt(tdf_10); names(tdf_10m) <- c("Day", "Member", "D10")
-  # tdf <- cbind(tdf_02m, D06 = tdf_06m$D06, D10 = tdf_10m$D10)
-  # tdfm <- reshape2::melt(tdf, id=c("Day", "Member"))
-  # Boxplots
-  boxplot(tdfrem$value, tdf_02m$D02, tdf_06m$D06, tdf_10m$D10)
-  # Densities
-  ggplot() +
-    geom_density(data = tdfm, aes(x = value, group = variable, fill=variable),
-                 alpha=0.5, adjust=2) +
-    geom_density(data = tdfrem, aes(x = value, fill="REA"), alpha=0.5, adjust=2) +
-    scale_x_continuous(limits=c(0, 12.5), expand = c(0, 0)) +
-    theme_bw() +
-    ylab("Density") +
-    xlab("FWI")
-  # Conduct one-way ANOVA
-  tdf <- as.data.frame(cbind(tdf_rem$REA, tdf_02m$D02, tdf_06m$D06, tdf_10m$D10))
-  tdf_stack <- stack(tdf)
-  anova1 <- aov(values ~ ind, data = tdf_stack)
-  summary(anova1)
-  TukeyHSD(anova1)
-  # Plot time series
-  ggplot() +
-    geom_line(data = tdfm, aes(x = Day, y = value, group = Member), color = "lightgray") +
-    facet_grid(rows = vars(variable)) +
-    geom_line(data = tdfrem, aes(x = Day, y = value, group = Member), color = "red") +
-    scale_x_continuous(limits=c(1, xdays), expand = c(0, 0)) +
-    theme_bw() +
-    ylab("FWI") +
-    xlab("")
+arr <- readRDS("data/bias_array.rds")
+df <- data.frame(matrix(NA, ncol = 14, nrow = 10))
+for (leadtime in 1:10){
+  for (region in 1:14){
+    df[leadtime, region] <- mean(arr[, leadtime, region])
+  }
 }
+saveRDS(df, "data/bias_df.rds")
+# df <- readRDS("data/bias_df.rds")
+names(df) <- BasisRegions$Region
+df$leadtime <- 1:10
 
+df_melt <- tidyr::pivot_longer(df, cols = 1:14)
+names(df_melt)[2] <- "Region"
 
-Continuous Ranked Probability Score for ensemble forecasts
+palette <- rev(c("#E9E9E9", "#D8AB93", "#FFFECC", "#B49DCC", "#E4D8EA", "#FCBE7F",
+             "#E4D8EA", "#F18C8D", "#FDCCCC", "#98CF95", "#D8EFC4", "#8EBBD9",
+             "#D2E6F1", "#D4D4D4"))
 
+# Grouped
+#f4_mod <- f4 %>% select(Region, fc_name, CRPS_fc) %>%
+# rename(leadtime = fc_name) %>% unique()
+# df_melt_f4 <- left_join(df_melt, f4_mod, by = c("Region", "leadtime"))
 
-dfre <- readRDS("dfre_noNAs.rds")
-df02 <- readRDS("df02_noNAs.rds")
-df06 <- readRDS("df06_noNAs.rds")
-df10 <- readRDS("df10_noNAs.rds")
+ggplot(df_melt, aes(fill = Region, y = value, x = as.factor(leadtime))) +
+  geom_bar(position = "dodge", stat = "identity") +
+  scale_fill_manual(values = palette, labels = BasisRegions$Region) +
+  # scale_fill_viridis(discrete = T) +
+  #ggtitle("Mean bias by region and leadtime") +
+  theme_bw() +
+  xlab("Leadtime") + ylab("BIAS")
 
-library("easyVerification")
-
-crps <- data.frame(matrix(NA, nrow = 0, ncol = 5))
-
-for (region in 1:14){
-
-  print(region)
-
-  fc_Mem_02 <- df02[, , region]
-  fc_Mem_06 <- df06[, , region]
-  fc_Mem_10 <- df10[, , region]
-  Obs <- dfre[, region]
-
-  CRPS_FC_02 <- veriApply(verifun = "EnsCrps", fcst = fc_Mem_02, obs = Obs)
-  CRPS_FC_06 <- veriApply(verifun = "EnsCrps", fcst = fc_Mem_06, obs = Obs)
-  CRPS_FC_10 <- veriApply(verifun = "EnsCrps", fcst = fc_Mem_10, obs = Obs)
-  tmp <- data.frame(day02 = CRPS_FC_02,
-                    day06 = CRPS_FC_06,
-                    day10 = CRPS_FC_10)
-  tmp$day <- 1:343
-  tmp$region <- region
-
-  crps <- rbind(crps, tmp)
-}
-saveRDS(object = crps, file = "crps.rds")
-
-# Daily mean across regions
-library(tidyverse)
-crps_mean <- crps %>%
-  group_by(day) %>%
-  summarise(Day2 = list(enframe(quantile(day02, probs=c(0.10, 0.50, 0.90), na.rm = TRUE))),
-            Day6 = list(enframe(quantile(day06, probs=c(0.10, 0.50, 0.90), na.rm = TRUE))),
-            Day10 = list(enframe(quantile(day10, probs=c(0.10, 0.50, 0.90), na.rm = TRUE)))) %>%
-  unnest %>%
-  select(day, name, value, value1, value2) %>%
-  rename(Day = day, Prob = name, Day2 = value, Day6 = value1, Day10 = value2)
-# Plot quantiles
-crps_long <- reshape2::melt(crps_mean, id = c("Day", "Prob")) # convert to long format
-ggplot(data=crps_long, aes(x=Day, y=value, colour=Prob)) +
-  geom_line() +
-  facet_grid(variable ~ .) +
-  xlab("Day of year") +
-  ylab("CRPS")+
-  scale_color_manual(values=c("#999999","#E69F00", "#999999")) +
-  scale_x_continuous(limits=c(1, 343), expand = c(0, 0)) +
-  theme_bw()
-# Plot histograms
-crps_hist <- crps %>%
-  group_by(day) %>%
-  summarise(Day2 = mean(day02, na.rm = TRUE),
-            Day6 = mean(day06, na.rm = TRUE),
-            Day10 = mean(day10, na.rm = TRUE))
-crps_hist <- reshape2::melt(crps_hist, id = "day")
-ggplot(crps_hist, aes(x=value, color=variable, fill=variable)) +
-  geom_histogram(position="dodge") +
-  xlab("")
-
-
-# Example plot
-crps_long <- reshape2::melt(crps, id = c("day", "region"))  # convert to long format
-ggplot(data=crps_long, aes(x=day, y=value, colour=variable)) +
-  geom_line() +
-  facet_grid(region ~ .)
-
-# Region X
-region <- 1
-x <- as.data.frame(df02[, , region])
-x$day <- 1:343
-x$rea <- dfre[, region]
-x <- reshape2::melt(x, id = "day")
-x$Type <- "Ensemble"; x$Type[x$variable == "rea"] <- "Reanalysis"
-ggplot(data=x, aes(x=day, y=value, colour=Type, group = variable)) +
-  geom_line() +
-  scale_color_manual(values=c("#999999","#E69F00"))
-
+ggsave(filename = "images/FigureA1.eps", plot = last_plot(),
+       width = W, height = H, units = "in",
+       device = cairo_ps, fallback_resolution = 600)
