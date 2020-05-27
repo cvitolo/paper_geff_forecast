@@ -1,7 +1,7 @@
 # GEFF-Forecasts
 > Global ECMWF Forest Fire (GEFF) system - Fire danger forecasts based on ECMWF IFS
 
-[![DOI](https://zenodo.org/badge/xxx.svg)](https://zenodo.org/badge/latestdoi/xxx)
+[![DOI](https://zenodo.org/badge/219000725.svg)](https://zenodo.org/badge/latestdoi/219000725)
 
 This repository contains the scripts to reproduce the content of the GEFF-forecast research paper:
 
