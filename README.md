@@ -5,4 +5,4 @@
 
 This repository contains the scripts to reproduce the content of the GEFF-forecast research paper:
 
-Di Giuseppe F., Vitolo C., Krzeminski B., Barnard C., Maciel P., San-Miguel-Ayanz J., (under review). Fire weather index: the  skill provided by ECMWF ensemble prediction system. (under review)
+Di Giuseppe F., Vitolo C., Krzeminski B., Barnard C., Maciel P., San-Miguel-Ayanz J., 2020. Fire weather index: the  skill provided by ECMWF ensemble prediction system. (accepted)
